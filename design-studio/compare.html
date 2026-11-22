@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AGY Switch v3.0 — 方向 A 完整 5 画面高保真原型</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --canvas: #f3f6fb;
+      --sidebar: #edf1f7;
+      --card: #ffffff;
+      --inset: #f6f8fc;
+      --border: rgba(15,23,42,0.08);
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent: #2563eb;
+      --green: #16a34a;
+      --orange: #ea580c;
+      --red: #dc2626;
+      --radius: 13px;
+      --shadow: 0 4px 16px rgba(15,23,42,0.05);
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+      background: radial-gradient(circle at 50% 0%, #172033 0%, #0b0e14 70%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .banner-tip {
+      color: #cbd5e1;
+      font-size: 12.5px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .banner-tip b { color: #60a5fa; }
+
+    .mac-window {
+      width: 1140px;
+      max-width: 100%;
+      height: 720px;
+      border-radius: 15px;
+      overflow: hidden;
+      display: flex;
+      background: var(--canvas);
+      border: 1px solid rgba(255,255,255,0.18);
+      box-shadow: 0 30px 90px rgba(0,0,0,0.55);
+    }
+    .sidebar {
+      width: 204px;
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 16px 12px;
+      flex-shrink: 0;
+    }
+    .traffic { display: flex; gap: 7px; margin-bottom: 18px; padding-left: 4px; }
+    .traffic i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+    .traffic i:nth-child(1) { background: #ff5f56; }
+    .traffic i:nth-child(2) { background: #ffbd2e; }
+    .traffic i:nth-child(3) { background: #27c93f; }
+
+    .app-brand {
+      display: flex; align-items: center; gap: 9px;
+      padding: 4px 8px 16px; font-weight: 700; font-size: 14.5px;
+    }
+    .app-logo {
+      width: 26px; height: 26px; border-radius: 7px;
+      background: linear-gradient(135deg, #1d4ed8, #38bdf8);
+      display: grid; place-items: center; color: #fff; font-size: 13px;
+    }
+    .nav-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 9px 11px; border-radius: 9px; font-size: 13px; font-weight: 500;
+      color: var(--muted); cursor: pointer; margin-bottom: 3px; transition: all 0.15s;
+    }
+    .nav-item:hover { background: rgba(15,23,42,0.04); color: var(--text); }
+    .nav-item.active { background: var(--accent); color: #fff; box-shadow: 0 3px 10px rgba(37,99,235,0.28); }
+    .nav-badge { font-size: 10.5px; padding: 1px 7px; border-radius: 99px; background: rgba(255,255,255,0.22); }
+    .nav-item:not(.active) .nav-badge { background: rgba(15,23,42,0.07); color: var(--muted); }
+
+    .sidebar-foot {
+      margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 11.5px; color: var(--muted);
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .topbar {
+      height: 54px; padding: 0 22px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--card); flex-shrink: 0;
+    }
+    .telemetry { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--muted); }
+    .telemetry strong { color: var(--text); font-weight: 600; }
+    .top-actions { display: flex; gap: 8px; }
+    .btn {
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
+      padding: 6px 13px; border-radius: 99px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .btn:hover { background: var(--inset); }
+    .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+    .btn.primary:hover { background: #1d4ed8; }
+
+    .view { display: none; flex: 1; overflow-y: auto; padding: 20px 22px; flex-direction: column; gap: 16px; }
+    .view.active { display: flex; }
+
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 15px 16px; box-shadow: var(--shadow);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .card.highlight { border-color: rgba(37,99,235,0.45); box-shadow: 0 6px 20px rgba(37,99,235,0.08); }
+    .pill { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; }
+    .pill.blue { background: rgba(37,99,235,0.12); color: var(--accent); }
+    .pill.orange { background: rgba(234,88,12,0.12); color: var(--orange); }
+    .pill.green { background: rgba(22,163,74,0.12); color: var(--green); }
+    .pill.red { background: rgba(220,38,38,0.12); color: var(--red); }
+
+    .quota-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .qbox { background: var(--inset); border-radius: 9px; padding: 9px 11px; }
+    .qbox-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; font-size: 11px; color: var(--muted); }
+    .qbox-pct { font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .bar { height: 3.5px; background: rgba(15,23,42,0.08); border-radius: 99px; overflow: hidden; margin-bottom: 4px; }
+    .bar i { display: block; height: 100%; border-radius: 99px; }
+    .qbox-sub { font-size: 10px; color: var(--muted); }
+
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .grid-2 { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 14px; }
+    .sec-head { display: flex; justify-content: space-between; align-items: center; font-size: 13.5px; font-weight: 600; }
+    .sec-head span { font-size: 11.5px; color: var(--muted); font-weight: 400; }
+
+    .card-top { display: flex; align-items: center; justify-content: space-between; }
+    .card-name { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .card-foot { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); }
+    .icon-row { display: flex; gap: 10px; font-size: 12px; opacity: 0.75; }
+
+    .input {
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
+      padding: 7px 11px; border-radius: 8px; font-size: 12.5px; outline: none;
+    }
+    .input:focus { border-color: var(--accent); }
+    .seg { display: inline-flex; background: rgba(15,23,42,0.06); padding: 3px; border-radius: 9px; gap: 2px; }
+    .seg button { border: none; background: transparent; padding: 5px 11px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; }
+    .seg button.active { background: #fff; color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+
+    .code-preview {
+      background: var(--inset); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px; line-height: 1.6; color: #334155; white-space: pre-wrap;
+    }
+    .doc-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 13px 15px; background: var(--card); border: 1px solid var(--border);
+      border-radius: 11px; box-shadow: var(--shadow);
+    }
+    .setting-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+    }
+    .setting-row:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div class="banner-tip">
+    <b>AGY Switch v3.0 · 方向 A（Apple 冷灰通透风）完整 5 画面交互原型</b> · 点击左侧边栏切换全部 5 个视图体验
+  </div>
+
+  <div class="mac-window">
+    <aside class="sidebar">
+      <div class="traffic"><i></i><i></i><i></i></div>
+      <div class="app-brand"><div class="app-logo">⚡</div> AGY Switch</div>
+      <div class="nav-item active" onclick="go('dashboard', this)">总览 <span class="nav-badge">11</span></div>
+      <div class="nav-item" onclick="go('accounts', this)">账号池 <span class="nav-badge">10满</span></div>
+      <div class="nav-item" onclick="go('handoff', this)">交接中心</div>
+      <div class="nav-item" onclick="go('doctor', this)">运行体检 <span class="nav-badge" style="color:var(--orange)">1提醒</span></div>
+      <div class="nav-item" onclick="go('settings', this)">设置</div>
+      <div class="sidebar-foot">
+        <span><i class="dot" style="background:var(--accent)"></i> 3-rewihbhsuh</span>
+        <span>v3.0</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="telemetry">
+          <span>账号池 <strong>11</strong></span>
+          <span>·</span>
+          <span style="color:var(--green)">满血 <strong>10</strong></span>
+          <span>·</span>
+          <span>当前工作区 <strong>/workspace</strong></span>
+        </div>
+        <div class="top-actions">
+          <button class="btn">↻ 刷新</button>
+          <button class="btn primary">⚡ 一键接力到下一个满血号</button>
+        </div>
+      </header>
+
+      <!-- 1. 总览 -->
+      <section class="view active" id="v-dashboard">
+        <div class="card highlight">
+          <div class="card-top">
+            <div class="card-name" style="font-size:18px">
+              <i class="dot" style="background:var(--accent);width:9px;height:9px"></i>
+              3-rewihbhsuh
+              <span class="pill blue">PID 65,173</span>
+              <span class="pill orange">55m 后滚动重置</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span style="font-size:11.5px;color:var(--muted)">上次接力：21:50 → 3-rewihbhsuh</span>
+              <button class="btn">校准额度</button>
+            </div>
+          </div>
+          <div class="quota-pair">
+            <div class="qbox">
+              <div class="qbox-head"><span>5 小时窗口 · 已校准</span><span class="qbox-pct" style="color:var(--green)">81%</span></div>
+              <div class="bar"><i style="width:81%;background:var(--green)"></i></div>
+              <div class="qbox-sub">近 5h 已用 110 轮</div>
+            </div>
+            <div class="qbox">
+              <div class="qbox-head"><span>本周额度 (7d) · 已校准</span><span class="qbox-pct" style="color:var(--accent)">94%</span></div>
+              <div class="bar"><i style="width:94%;background:var(--accent)"></i></div>
+              <div class="qbox-sub">近 7d 累计 517 轮</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sec-head">
+          推荐备用满血号
+          <span>按空闲度排序 · 切号自动打开当前工作区并复制接力词</span>
+        </div>
+
+        <div class="grid-3">
+          <div class="card">
+            <div class="card-top"><div class="card-name"><i class="dot" style="background:var(--green)"></i> 1-suyhghsum</div><span class="pill green">满血</span></div>
+            <div class="quota-pair">
+              <div class="qbox"><div class="qbox-head"><span>5h</span><span class="qbox-pct" style="color:var(--green)">100%</span></div><div class="bar"><i style="width:100%;background:var(--green)"></i></div><div class="qbox-sub">0 轮</div></div>
+              <div class="qbox"><div class="qbox-head"><span>7d</span><span class="qbox-pct" style="color:var(--accent)">100%</span></div><div class="bar"><i style="width:100%;background:var(--accent)"></i></div><div class="qbox-sub">2 轮</div></div>
+            </div>
+            <div class="card-foot"><div class="icon-row"><span>⚙</span><span>❄</span></div><button class="btn primary" style="padding:4px 10px;font-size:11px">切换</button></div>
+          </div>
+          <div class="card">
+            <div class="card-top"><div class="card-name"><i class="dot" style="background:var(--green)"></i> 2-djgarbage</div><span class="pill green">满血</span></div>
+            <div class="quota-pair">
+              <div class="qbox"><div class="qbox-head"><span>5h</span><span class="qbox-pct" style="color:var(--green)">100%</span></div><div class="bar"><i style="width:100%;background:var(--green)"></i></div><div class="qbox-sub">0 轮</div></div>
+              <div class="qbox"><div class="qbox-head"><span>7d</span><span class="qbox-pct" style="color:var(--accent)">100%</span></div><div class="bar"><i style="width:100%;background:var(--accent)"></i></div><div class="qbox-sub">0 轮</div></div>
+            </div>
+            <div class="card-foot"><div class="icon-row"><span>⚙</span><span>❄</span></div><button class="btn primary" style="padding:4px 10px;font-size:11px">切换</button></div>
+          </div>
+          <div class="card">
+            <div class="card-top"><div class="card-name"><i class="dot" style="background:var(--green)"></i> 4-djgarbage77</div><span class="pill green">满血</span></div>
+            <div class="quota-pair">
+              <div class="qbox"><div class="qbox-head"><span>5h</span><span class="qbox-pct" style="color:var(--green)">100%</span></div><div class="bar"><i style="width:100%;background:var(--green)"></i></div><div class="qbox-sub">0 轮</div></div>
+              <div class="qbox"><div class="qbox-head"><span>7d</span><span class="qbox-pct" style="color:var(--accent)">99%</span></div><div class="bar"><i style="width:99%;background:var(--accent)"></i></div><div class="qbox-sub">13 轮</div></div>
+            </div>
+            <div class="card-foot"><div class="icon-row"><span>⚙</span><span>❄</span></div><button class="btn primary" style="padding:4px 10px;font-size:11px">切换</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. 账号池 -->
+      <section class="view" id="v-accounts">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="display:flex;gap:10px;align-items:center">
+            <input class="input" style="width:200px" placeholder="搜索账号名或备注..." />
+            <div class="seg">
+              <button class="active">全部 (11)</button>
+              <button>满血 (10)</button>
+              <button>冷却 (0)</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn">解除全部冷却</button>
+            <button class="btn primary">+ 添加隔离账号</button>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="card highlight">
+            <div class="card-top"><div class="card-name"><i class="dot" style="background:var(--accent)"></i> 3-rewihbhsuh</div><span class="pill blue">当前</span></div>
+            <div style="font-size:11px;color:var(--accent)">🏷 主力开发号</div>
+            <div class="quota-pair">
+              <div class="qbox"><div class="qbox-head"><span>5h</span><span class="qbox-pct" style="color:var(--green)">81%</span></div><div class="bar"><i style="width:81%;background:var(--green)"></i></div><div class="qbox-sub">55m 重置</div></div>
+              <div class="qbox"><div class="qbox-head"><span>7d</span><span class="qbox-pct" style="color:var(--accent)">94%</span></div><div class="bar"><i style="width:94%;background:var(--accent)"></i></div><div class="qbox-sub">已校准</div></div>
+            </div>
+            <div class="card-foot"><div class="icon-row"><span>⚙</span><span>❄</span><span>🗑</span></div><button class="btn" disabled>使用中</button></div>
+          </div>
+          <div class="card">
+            <div class="card-top"><div class="card-name"><i class="dot" style="background:var(--green)"></i> 主账号 (~/.gemini)</div><span class="pill green">满血</span></div>
+            <div style="font-size:11px;color:var(--muted)">🏷 加备注</div>
+            <div class="quota-pair">
+              <div class="qbox"><div class="qbox-head"><span>5h</span><span class="qbox-pct" style="color:var(--green)">45%</span></div><div class="bar"><i style="width:45%;background:var(--green)"></i></div><div class="qbox-sub">110/200 轮</div></div>
+              <div class="qbox"><div class="qbox-head"><span>7d</span><span class="qbox-pct" style="color:var(--accent)">48%</span></div><div class="bar"><i style="width:48%;background:var(--accent)"></i></div><div class="qbox-sub">517/1000 轮</div></div>
+            </div>
+            <div class="card-foot"><div class="icon-row"><span>⚙</span><span>❄</span></div><button class="btn primary" style="padding:4px 10px;font-size:11px">切换</button></div>
+          </div>
+          <div class="card">
+            <div class="card-top"><div class="card-name"><i class="dot" style="background:var(--orange)"></i> 11-newdemo</div><span class="pill orange">待登录</span></div>
+            <div style="font-size:11px;color:var(--muted)">🏷 新建备用号</div>
+            <div class="quota-pair">
+              <div class="qbox"><div class="qbox-head"><span>5h</span><span class="qbox-pct" style="color:var(--muted)">—</span></div><div class="bar"><i style="width:0%"></i></div><div class="qbox-sub">未登录</div></div>
+              <div class="qbox"><div class="qbox-head"><span>7d</span><span class="qbox-pct" style="color:var(--muted)">—</span></div><div class="bar"><i style="width:0%"></i></div><div class="qbox-sub">未登录</div></div>
+            </div>
+            <div class="card-foot"><div class="icon-row"><span>🗑</span></div><button class="btn primary" style="padding:4px 10px;font-size:11px">去登录</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. 交接中心（含历史归档时间轴） -->
+      <section class="view" id="v-handoff">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong>生成跨账号交接单 (HANDOFF_AUTO.md)</strong>
+            <button class="btn primary">生成并复制接力词</button>
+          </div>
+          <div style="display:flex;gap:10px">
+            <select class="input" style="width:260px">
+              <option>自动选择最近活跃会话 (3-rewihbhsuh)</option>
+              <option>主账号 · 2026-11-22 18:55</option>
+            </select>
+            <input class="input" style="flex:1" placeholder="给下一个号的特别交代（例如：先修登录报错，不要动数据库）" />
+          </div>
+        </div>
+        <div class="grid-2" style="flex:1;min-height:0">
+          <div class="card" style="overflow:hidden">
+            <div class="sec-head">当前交接单预览 <span>更新于 2026-11-22 21:50</span></div>
+            <div class="code-preview" style="flex:1;overflow:auto"># Antigravity 跨账号自动交接单 (HANDOFF_AUTO)
+
+- 工作区: /Users/tom/Desktop/workspace
+- 来源会话: 3-rewihbhsuh (61fe80b9...)
+
+## 给下一个号的特别交代
+继续完善 AGY Switch v3.0 视觉落地。
+
+## 当前工作区 Git 变更
+ M agy-switch/macos/AgySwitch.swift
+ M agy-switch/server.py</div>
+          </div>
+          <div class="card">
+            <div class="sec-head">历史归档 (.handoff_history) <span>最多保留 10 份</span></div>
+            <div style="display:flex;flex-direction:column;gap:8px;font-size:12px">
+              <div class="qbox" style="display:flex;justify-content:space-between;align-items:center">
+                <div><strong>HANDOFF_20261122_2150.md</strong><div class="qbox-sub">15.2 KB · 3-rewihbhsuh</div></div>
+                <button class="btn" style="padding:3px 9px;font-size:11px">恢复</button>
+              </div>
+              <div class="qbox" style="display:flex;justify-content:space-between;align-items:center">
+                <div><strong>HANDOFF_20261122_1943.md</strong><div class="qbox-sub">7.9 KB · main</div></div>
+                <button class="btn" style="padding:3px 9px;font-size:11px">恢复</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. 运行体检（含一键修复构想） -->
+      <section class="view" id="v-doctor">
+        <div class="sec-head">本地运行环境体检（6 项核心检查） <button class="btn primary">重新体检</button></div>
+        <div class="doc-row">
+          <div><strong>✅ Antigravity 运行实例</strong><div style="font-size:12px;color:var(--muted)">单实例安全运行中 · PID 65173 · 主进程内存 139.2 MB</div></div>
+          <span class="pill green">正常</span>
+        </div>
+        <div class="doc-row">
+          <div><strong>✅ 多开启动器 (.app) & 公共 Skills 软链</strong><div style="font-size:12px;color:var(--muted)">10/10 个隔离实例启动器与公共 Skills 软链完整</div></div>
+          <span class="pill green">正常</span>
+        </div>
+        <div class="doc-row" style="border-color:rgba(234,88,12,0.35)">
+          <div><strong>⚠️ 对话日志隔离 (brain)</strong><div style="font-size:12px;color:var(--muted)">3-rewihbhsuh 的 brain 软链到了主账号，本地统计会重叠</div></div>
+          <button class="btn">查看说明</button>
+        </div>
+        <div class="doc-row">
+          <div><strong>✅ 接力工作区与 HANDOFF_AUTO.md</strong><div style="font-size:12px;color:var(--muted)">/Users/tom/Desktop/workspace · 交接单已就绪</div></div>
+          <span class="pill green">正常</span>
+        </div>
+      </section>
+
+      <!-- 5. 设置（含多工作区快捷切换） -->
+      <section class="view" id="v-settings">
+        <div class="card">
+          <div class="sec-head">常用接力工作区（支持多项目一键切换） <button class="btn">+ 添加目录</button></div>
+          <div class="setting-row">
+            <div><strong>/Users/tom/Desktop/workspace</strong> <span class="pill blue">当前默认</span></div>
+            <button class="btn">在访达打开</button>
+          </div>
+          <div class="setting-row">
+            <div><strong>/Users/tom/Desktop/workspace/agy-switch</strong></div>
+            <button class="btn">设为当前</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="sec-head">预警参考线 & 系统集成</div>
+          <div class="setting-row"><span>5 小时窗口默认参考上限</span><strong>200 轮</strong></div>
+          <div class="setting-row"><span>7 天周默认参考上限</span><strong>1000 轮</strong></div>
+          <div class="setting-row"><span>登录 macOS 时自动启动 AGY Switch</span><span class="pill green">已开启</span></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    function go(id, el) {
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      document.getElementById('v-' + id).classList.add('active');
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      el.classList.add('active');
+    }
+  </script>
+</body>
+</html>

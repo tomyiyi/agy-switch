@@ -849,6 +849,8 @@ def main():
     parser.add_argument("--cli-switch", nargs="?", const="", default=None, help="一键切换账号（空串=自动选满血号）")
     parser.add_argument("--cli-cooldown", nargs=2, metavar=("ACC_ID", "HOURS"), help="设置账号冷却小时数（0=恢复满血）")
     parser.add_argument("--cli-clear-cooldowns", action="store_true", help="一键解除全部账号冷却")
+    parser.add_argument("--cli-restore-handoff", metavar="FILENAME", help="从 .handoff_history 恢复指定交接单")
+    parser.add_argument("--cli-workspaces", nargs=2, metavar=("ACTION", "PATH"), help="管理常用工作区列表 (add|use|remove)")
     args = parser.parse_args()
 
     state = load_state()
@@ -942,8 +944,20 @@ def main():
                 hf_updated = datetime.fromtimestamp(hf_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
+        hist_items = []
+        hist_dir = Path(ws) / ".handoff_history"
+        if hist_dir.exists():
+            for p in sorted(hist_dir.glob("HANDOFF_*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:10]:
+                st = p.stat()
+                hist_items.append({
+                    "name": p.name,
+                    "kb": round(st.st_size / 1024, 1),
+                    "time": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M"),
+                })
+        ws_list = list(dict.fromkeys([ws] + [w for w in state.get("workspaces", []) if w]))
         print(json.dumps({
             "workspace": ws,
+            "workspaces": ws_list,
             "running_id": running_id,
             "accounts": accounts,
             "sessions": sessions[:8],
@@ -951,8 +965,50 @@ def main():
             "warn_7d_limit": int(state.get("warn_7d_limit", WARN_7D_LIMIT)),
             "handoff_preview": hf_preview,
             "handoff_updated": hf_updated,
+            "handoff_history": hist_items,
             "last_switch": state.get("last_switch", ""),
         }, ensure_ascii=False))
+        return
+
+    if args.cli_restore_handoff:
+        ws = Path(state.get("workspace", DEFAULT_WORKSPACE))
+        src = ws / ".handoff_history" / os.path.basename(args.cli_restore_handoff)
+        if not src.exists():
+            print(json.dumps({"error": "历史交接单不存在"}, ensure_ascii=False))
+            return
+        (ws / "HANDOFF_AUTO.md").write_bytes(src.read_bytes())
+        try:
+            subprocess.run(["pbcopy"], input=RELAY_PROMPT, text=True, check=False)
+        except Exception:
+            pass
+        print(json.dumps({"ok": True, "restored": src.name}, ensure_ascii=False))
+        return
+
+    if args.cli_workspaces:
+        act, path_val = args.cli_workspaces
+        path_val = path_val.strip()
+        ws_list = list(state.get("workspaces", [DEFAULT_WORKSPACE]))
+        if act == "add" and os.path.isdir(path_val):
+            if path_val not in ws_list:
+                ws_list.append(path_val)
+            state["workspaces"] = ws_list
+            state["workspace"] = path_val
+            save_state(state)
+        elif act == "use" and os.path.isdir(path_val):
+            if path_val not in ws_list:
+                ws_list.append(path_val)
+            state["workspaces"] = ws_list
+            state["workspace"] = path_val
+            save_state(state)
+        elif act == "remove":
+            ws_list = [w for w in ws_list if w != path_val]
+            if not ws_list:
+                ws_list = [DEFAULT_WORKSPACE]
+            state["workspaces"] = ws_list
+            if state.get("workspace") == path_val:
+                state["workspace"] = ws_list[0]
+            save_state(state)
+        print(json.dumps({"ok": True, "workspace": state["workspace"], "workspaces": state["workspaces"]}, ensure_ascii=False))
         return
 
     if args.cli_config:

@@ -33,8 +33,16 @@ struct SessionInfo: Decodable, Identifiable {
     let time: String
 }
 
+struct HandoffHistItem: Decodable, Identifiable {
+    var id: String { name }
+    let name: String
+    let kb: Double
+    let time: String
+}
+
 struct StatusPayload: Decodable {
     let workspace: String
+    let workspaces: [String]?
     let running_id: String
     let accounts: [AccountInfo]
     let sessions: [SessionInfo]
@@ -42,6 +50,7 @@ struct StatusPayload: Decodable {
     let warn_7d_limit: Int
     let handoff_preview: String
     let handoff_updated: String
+    let handoff_history: [HandoffHistItem]?
     let last_switch: String?
 }
 
@@ -305,6 +314,26 @@ final class SwitchStore: ObservableObject {
             _ = self?.runCLI(["--cli-note", accId, note])
             DispatchQueue.main.async {
                 self?.showToast("已更新 \(accId) 备注")
+                self?.refresh()
+            }
+        }
+    }
+
+    func restoreHandoff(_ filename: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.runCLI(["--cli-restore-handoff", filename])
+            DispatchQueue.main.async {
+                self?.showToast("已恢复 \(filename) 为当前交接单，接力词已复制")
+                self?.refresh()
+            }
+        }
+    }
+
+    func manageWorkspace(_ action: String, path: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.runCLI(["--cli-workspaces", action, path])
+            DispatchQueue.main.async {
+                self?.showToast(action == "remove" ? "已移除工作区" : "已切换当前接力工作区")
                 self?.refresh()
             }
         }
@@ -877,23 +906,69 @@ struct HandoffView: View {
             .background(RoundedRectangle(cornerRadius: 13).fill(DS.cardBg).shadow(color: .black.opacity(0.04), radius: 6, y: 2))
             .overlay(RoundedRectangle(cornerRadius: 13).stroke(DS.border, lineWidth: 1))
 
-            HStack {
-                Text("当前交接单预览").font(.subheadline.bold())
-                Spacer()
-                if let upd = store.status?.handoff_updated, !upd.isEmpty {
-                    Text("更新于 \(upd)").font(.caption).foregroundColor(.secondary)
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("当前交接单预览").font(.subheadline.bold())
+                        Spacer()
+                        if let upd = store.status?.handoff_updated, !upd.isEmpty {
+                            Text("更新于 \(upd)").font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                    ScrollView {
+                        Text(store.status?.handoff_preview.isEmpty == false ? store.status!.handoff_preview : "尚未生成 HANDOFF_AUTO.md，点击上方按钮即可生成。")
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(14)
+                    }
+                    .background(RoundedRectangle(cornerRadius: 12).fill(DS.cardBg))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.border, lineWidth: 1))
                 }
-            }
+                .frame(maxWidth: .infinity)
 
-            ScrollView {
-                Text(store.status?.handoff_preview.isEmpty == false ? store.status!.handoff_preview : "尚未生成 HANDOFF_AUTO.md，点击上方按钮即可生成。")
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(14)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("历史归档").font(.subheadline.bold())
+                        Spacer()
+                        Text("最近 10 份").font(.caption).foregroundColor(.secondary)
+                    }
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            let hist = store.status?.handoff_history ?? []
+                            if hist.isEmpty {
+                                Text("暂无历史归档\n每次更新交接单时自动备份")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.top, 28)
+                            } else {
+                                ForEach(hist) { item in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(item.name)
+                                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                                .lineLimit(1)
+                                            Text("\(item.time) · \(String(format: "%.1f", item.kb)) KB")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        Button("恢复") { store.restoreHandoff(item.name) }
+                                            .controlSize(.small)
+                                    }
+                                    .padding(9)
+                                    .background(RoundedRectangle(cornerRadius: 8).fill(DS.insetBg))
+                                }
+                            }
+                        }
+                        .padding(10)
+                    }
+                    .background(RoundedRectangle(cornerRadius: 12).fill(DS.cardBg))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.border, lineWidth: 1))
+                }
+                .frame(width: 270)
             }
-            .background(RoundedRectangle(cornerRadius: 12).fill(DS.cardBg))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.border, lineWidth: 1))
         }
         .padding(20)
         .background(DS.canvasBg)
@@ -952,15 +1027,47 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("接力工作区") {
-                HStack {
-                    TextField("工作区目录", text: $workspace).textFieldStyle(.roundedBorder)
-                    Button("选择文件夹...") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseFiles = false
-                        panel.canChooseDirectories = true
-                        panel.allowsMultipleSelection = false
-                        if panel.runModal() == .OK, let url = panel.url { workspace = url.path }
+            Section("常用接力工作区（多项目一键切换）") {
+                ForEach(store.status?.workspaces ?? [workspace], id: \.self) { wsPath in
+                    HStack {
+                        Text(wsPath)
+                            .font(.system(size: 12, design: .monospaced))
+                            .lineLimit(1)
+                        if wsPath == store.status?.workspace {
+                            Text("当前")
+                                .font(.caption2.bold())
+                                .foregroundColor(DS.brandBlue)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(DS.brandBlue.opacity(0.12)))
+                        }
+                        Spacer()
+                        if wsPath != store.status?.workspace {
+                            Button("设为当前") {
+                                workspace = wsPath
+                                store.manageWorkspace("use", path: wsPath)
+                            }
+                            .controlSize(.small)
+                        }
+                        Button(action: { NSWorkspace.shared.open(URL(fileURLWithPath: wsPath)) }) {
+                            Image(systemName: "folder")
+                        }
+                        .buttonStyle(.plain)
+                        if (store.status?.workspaces?.count ?? 1) > 1 {
+                            Button(action: { store.manageWorkspace("remove", path: wsPath) }) {
+                                Image(systemName: "trash").foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                Button("+ 添加常用工作区目录...") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.allowsMultipleSelection = false
+                    if panel.runModal() == .OK, let url = panel.url {
+                        workspace = url.path
+                        store.manageWorkspace("add", path: url.path)
                     }
                 }
             }
@@ -1021,7 +1128,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v2.1")
+                        Text("v3.0")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
