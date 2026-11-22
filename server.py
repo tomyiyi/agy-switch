@@ -27,8 +27,8 @@ STATE_DIR = HOME / ".agy-switch"
 STATE_FILE = STATE_DIR / "state.json"
 DEFAULT_WORKSPACE = str(HOME / "Desktop" / "workspace")
 RELAY_PROMPT = "请先阅读 HANDOFF_AUTO.md，接力继续刚才未完成的工作。"
-WARN_5H_LIMIT = 80
-WARN_7D_LIMIT = 400
+WARN_5H_LIMIT = 200
+WARN_7D_LIMIT = 1000
 
 
 def load_state() -> dict:
@@ -848,6 +848,7 @@ def main():
     parser.add_argument("--cli-config", nargs=3, metavar=("WORKSPACE", "LIMIT_5H", "LIMIT_7D"), help="更新工作区与预警阈值")
     parser.add_argument("--cli-switch", nargs="?", const="", default=None, help="一键切换账号（空串=自动选满血号）")
     parser.add_argument("--cli-cooldown", nargs=2, metavar=("ACC_ID", "HOURS"), help="设置账号冷却小时数（0=恢复满血）")
+    parser.add_argument("--cli-clear-cooldowns", action="store_true", help="一键解除全部账号冷却")
     args = parser.parse_args()
 
     state = load_state()
@@ -950,6 +951,7 @@ def main():
             "warn_7d_limit": int(state.get("warn_7d_limit", WARN_7D_LIMIT)),
             "handoff_preview": hf_preview,
             "handoff_updated": hf_updated,
+            "last_switch": state.get("last_switch", ""),
         }, ensure_ascii=False))
         return
 
@@ -972,6 +974,12 @@ def main():
     if args.cli_handoff:
         res = generate_handoff(state.get("workspace", DEFAULT_WORKSPACE))
         print(json.dumps({"ok": True, **res}, ensure_ascii=False))
+        return
+
+    if args.cli_clear_cooldowns:
+        state["cooldowns"] = {}
+        save_state(state)
+        print(json.dumps({"ok": True}, ensure_ascii=False))
         return
 
     if args.cli_cooldown:

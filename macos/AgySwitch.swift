@@ -42,6 +42,7 @@ struct StatusPayload: Decodable {
     let warn_7d_limit: Int
     let handoff_preview: String
     let handoff_updated: String
+    let last_switch: String?
 }
 
 struct DoctorCheck: Decodable, Identifiable {
@@ -247,6 +248,16 @@ final class SwitchStore: ObservableObject {
             _ = self?.runCLI(["--cli-cooldown", accId, "\(hours)"])
             DispatchQueue.main.async {
                 self?.showToast(hours > 0 ? "已标记 \(accId) 冷却 \(hours) 小时" : "已恢复 \(accId) 为满血")
+                self?.refresh()
+            }
+        }
+    }
+
+    func clearAllCooldowns() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.runCLI(["--cli-clear-cooldowns"])
+            DispatchQueue.main.async {
+                self?.showToast("已一键解除全部账号冷却")
                 self?.refresh()
             }
         }
@@ -707,6 +718,11 @@ struct AccountsView: View {
 
                 Spacer()
 
+                if all.contains(where: { $0.health == "cooldown" }) {
+                    Button("解除全部冷却") { store.clearAllCooldowns() }
+                        .buttonStyle(SubtlePillButtonStyle())
+                }
+
                 Button(action: { store.refresh(showFeedback: true) }) {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
@@ -1005,7 +1021,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v2.0")
+                        Text("v2.1")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
