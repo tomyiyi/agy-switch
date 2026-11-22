@@ -328,6 +328,24 @@ def generate_handoff(workspace: str, transcript_path: str = "", max_turns: int =
         lines.append("")
 
     out_path = ws / "HANDOFF_AUTO.md"
+    # 归档旧交接单，防止覆盖丢失上下文（最多保留 10 份）
+    if out_path.exists() and out_path.stat().st_size > 0:
+        hist_dir = ws / ".handoff_history"
+        hist_dir.mkdir(exist_ok=True)
+        stamp = datetime.fromtimestamp(out_path.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
+        backup = hist_dir / f"HANDOFF_{stamp}.md"
+        if not backup.exists():
+            try:
+                backup.write_bytes(out_path.read_bytes())
+            except Exception:
+                pass
+        old_files = sorted(hist_dir.glob("HANDOFF_*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in old_files[10:]:
+            try:
+                stale.unlink()
+            except Exception:
+                pass
+
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
     # 写入剪贴板
@@ -824,6 +842,7 @@ def main():
     parser.add_argument("--cli-delete", metavar="ACC_ID", help="安全删除隔离账号（移入废纸篓）")
     parser.add_argument("--cli-note", nargs=2, metavar=("ACC_ID", "NOTE"), help="更新账号备注")
     parser.add_argument("--cli-calibrate", nargs=3, metavar=("ACC_ID", "PCT_5H", "PCT_7D"), help="校准账号真实剩余百分比")
+    parser.add_argument("--cli-autostart", choices=["status", "on", "off"], help="查询或开关 macOS 开机自启")
     parser.add_argument("--cli-handoff", action="store_true", help="生成 HANDOFF_AUTO.md 并复制接力词")
     parser.add_argument("--cli-handoff-save", nargs=2, metavar=("TRANSCRIPT", "NOTE"), help="按指定日志与特别交代生成交接单")
     parser.add_argument("--cli-config", nargs=3, metavar=("WORKSPACE", "LIMIT_5H", "LIMIT_7D"), help="更新工作区与预警阈值")
@@ -844,6 +863,39 @@ def main():
             print(json.dumps(delete_account(args.cli_delete, state), ensure_ascii=False))
         except Exception as e:
             print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        return
+
+    if args.cli_autostart:
+        plist = HOME / "Library" / "LaunchAgents" / "io.agyswitch.app.plist"
+        if args.cli_autostart == "status":
+            print(json.dumps({"enabled": plist.exists()}, ensure_ascii=False))
+        elif args.cli_autostart == "on":
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.agyswitch.app</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-a</string>
+    <string>/Applications/AGY Switch.app</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+""",
+                encoding="utf-8",
+            )
+            print(json.dumps({"ok": True, "enabled": True}, ensure_ascii=False))
+        else:
+            if plist.exists():
+                plist.unlink()
+            print(json.dumps({"ok": True, "enabled": False}, ensure_ascii=False))
         return
 
     if args.cli_calibrate:

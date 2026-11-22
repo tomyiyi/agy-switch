@@ -80,6 +80,7 @@ final class SwitchStore: ObservableObject {
     @Published var toast: String = ""
     @Published var isBusy: Bool = false
     @Published var isRefreshing: Bool = false
+    @Published var autoStartEnabled: Bool = false
 
     private var scriptPath: String {
         if let res = Bundle.main.resourcePath {
@@ -161,6 +162,25 @@ final class SwitchStore: ObservableObject {
             DispatchQueue.main.async {
                 self?.showToast("已校准 \(accId) 真实余量：5h \(pct5h)% · 周 \(pct7d)%")
                 self?.refresh()
+            }
+        }
+    }
+
+    func fetchAutoStart() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self, let data = self.runCLI(["--cli-autostart", "status"]),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let en = obj["enabled"] as? Bool else { return }
+            DispatchQueue.main.async { self.autoStartEnabled = en }
+        }
+    }
+
+    func setAutoStart(_ enabled: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.runCLI(["--cli-autostart", enabled ? "on" : "off"])
+            DispatchQueue.main.async {
+                self?.autoStartEnabled = enabled
+                self?.showToast(enabled ? "已开启开机自动启动" : "已关闭开机自动启动")
             }
         }
     }
@@ -321,6 +341,7 @@ struct PoolAccountCard: View {
     let onSwitch: () -> Void
     let onToggleCooldown: () -> Void
     var onEditNote: (() -> Void)? = nil
+    var onCalibrate: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
     var body: some View {
@@ -396,6 +417,10 @@ struct PoolAccountCard: View {
                     .buttonStyle(.plain)
                     .help("删除此隔离账号（移入废纸篓）")
                 }
+                if let calAction = onCalibrate {
+                    Button("校准") { calAction() }
+                        .controlSize(.small)
+                }
                 Button(acc.health == "cooldown" ? "恢复" : "冷却") {
                     onToggleCooldown()
                 }
@@ -458,9 +483,22 @@ struct DashboardView: View {
                                         .cornerRadius(6)
                                 }
                             }
-                            Text("当前接力工作区：\(store.status?.workspace ?? "-")")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            HStack(spacing: 6) {
+                                Text("当前接力工作区：\(store.status?.workspace ?? "-")")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                if let ws = store.status?.workspace, !ws.isEmpty {
+                                    Button(action: {
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: ws))
+                                    }) {
+                                        Image(systemName: "folder")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("在访达中打开工作区目录")
+                                }
+                            }
                         }
                         Spacer()
                         HStack(spacing: 8) {
@@ -588,6 +626,9 @@ struct AccountsView: View {
 
     @State private var editingNoteAcc: AccountInfo? = nil
     @State private var editingNoteText: String = ""
+    @State private var calibratingAcc: AccountInfo? = nil
+    @State private var calAcc5h: Double = 100
+    @State private var calAcc7d: Double = 100
     @State private var deletingAcc: AccountInfo? = nil
 
     var body: some View {
@@ -646,6 +687,11 @@ struct AccountsView: View {
                                 editingNoteAcc = acc
                                 editingNoteText = acc.note
                             },
+                            onCalibrate: {
+                                calibratingAcc = acc
+                                calAcc5h = Double(acc.remain_5h_pct)
+                                calAcc7d = Double(acc.remain_7d_pct)
+                            },
                             onDelete: {
                                 deletingAcc = acc
                             }
@@ -701,6 +747,31 @@ struct AccountsView: View {
                     Button("保存") {
                         store.updateNote(acc.id, note: editingNoteText)
                         editingNoteAcc = nil
+                    }
+                    .buttonStyle(PrimaryAccentButtonStyle(compact: true))
+                }
+            }
+            .padding(20)
+            .frame(width: 360)
+        }
+        // 校准任意账号额度弹窗
+        .sheet(item: $calibratingAcc) { acc in
+            VStack(alignment: .leading, spacing: 14) {
+                Text("校准真实剩余额度：\(acc.label)").font(.headline)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("5 小时窗口剩余：\(Int(calAcc5h))%").font(.callout.monospacedDigit())
+                    Slider(value: $calAcc5h, in: 0...100, step: 1)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("本周 (7d) 剩余：\(Int(calAcc7d))%").font(.callout.monospacedDigit())
+                    Slider(value: $calAcc7d, in: 0...100, step: 1)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") { calibratingAcc = nil }
+                    Button("保存校准") {
+                        store.calibrate(acc.id, pct5h: Int(calAcc5h), pct7d: Int(calAcc7d))
+                        calibratingAcc = nil
                     }
                     .buttonStyle(PrimaryAccentButtonStyle(compact: true))
                 }
@@ -867,6 +938,13 @@ struct SettingsView: View {
                 Stepper("7 天周上限：\(limit7d) 轮", value: $limit7d, in: 100...3000, step: 50)
             }
 
+            Section("系统集成") {
+                Toggle("登录 macOS 时自动启动 AGY Switch", isOn: Binding(
+                    get: { store.autoStartEnabled },
+                    set: { store.setAutoStart($0) }
+                ))
+            }
+
             HStack {
                 Spacer()
                 Button("保存设置") {
@@ -878,6 +956,7 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding(12)
         .onAppear {
+            store.fetchAutoStart()
             if let s = store.status {
                 workspace = s.workspace
                 limit5h = s.warn_5h_limit
