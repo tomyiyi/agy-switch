@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AGY Switch — Antigravity 多账号池与一键接力</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-hover: #1c222b;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --accent: #238636;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1180px; margin: 0 auto; }
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 20px;
+    }
+    .brand h1 { margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px; }
+    .brand p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    button {
+      border: 1px solid var(--border);
+      background: #21262d;
+      color: var(--text);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    button:hover { background: #30363d; }
+    button.primary {
+      background: var(--accent);
+      border-color: rgba(240,246,252,0.1);
+      color: #fff;
+    }
+    button.primary:hover { background: #2ea043; }
+    button.danger { color: var(--red); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .ws-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 20px;
+      font-size: 13px;
+    }
+    .ws-bar input {
+      flex: 1;
+      min-width: 260px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill.ready { background: rgba(63,185,80,0.15); color: var(--green); }
+    .pill.warning { background: rgba(210,153,34,0.15); color: var(--yellow); }
+    .pill.cooldown { background: rgba(248,81,73,0.15); color: var(--red); }
+    .pill.running { background: rgba(88,166,255,0.18); color: var(--blue); }
+
+    .section-title {
+      font-size: 14px;
+      color: var(--muted);
+      margin: 0 0 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      transition: border-color 0.15s;
+    }
+    .card.is-running { border-color: var(--blue); box-shadow: 0 0 0 1px rgba(88,166,255,0.3); }
+    .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .acc-name { font-weight: 600; font-size: 15px; word-break: break-all; }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .metrics strong { color: var(--text); font-size: 14px; display: block; }
+    .bar {
+      height: 6px;
+      background: #21262d;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar-fill { height: 100%; border-radius: 999px; transition: width 0.25s; }
+    .card-actions { display: flex; gap: 8px; margin-top: auto; }
+    .card-actions button { flex: 1; padding: 6px 8px; font-size: 12px; }
+
+    .sessions {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .session-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 11px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .session-row:last-child { border-bottom: none; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      background: #1f6feb;
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+      display: none;
+      max-width: 420px;
+      z-index: 99;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div class="brand">
+        <h1>⚡ AGY Switch <span class="pill running" id="running-badge">检测中...</span></h1>
+        <p>借鉴 cc-switch 设计的 Antigravity 本地多账号池监控 & 一键串行接力面板</p>
+      </div>
+      <div class="actions">
+        <button onclick="refresh()">刷新状态</button>
+        <button onclick="runHandoff()">仅生成交接单</button>
+        <button class="primary" onclick="smartSwitch('')">一键切到下一个满血号</button>
+      </div>
+    </div>
+
+    <div class="ws-bar">
+      <span>当前接力工作区：</span>
+      <input id="ws-input" type="text" placeholder="/Users/tom/Desktop/workspace" />
+      <button onclick="saveWorkspace()">保存目录</button>
+      <span id="handoff-status" class="mono"></span>
+    </div>
+
+    <div class="section-title">
+      <span>账号池状态（主账号 + 隔离多开实例）</span>
+      <span id="pool-summary" class="mono"></span>
+    </div>
+    <div class="grid" id="accounts-grid"></div>
+
+    <div class="section-title">
+      <span>最近活跃会话（点击可指定任意会话生成 HANDOFF_AUTO.md）</span>
+    </div>
+    <div class="sessions" id="sessions-list"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let currentData = null;
+
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.background = isError ? '#da3633' : '#1f6feb';
+      el.style.display = 'block';
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => { el.style.display = 'none'; }, 4000);
+    }
+
+    async function api(url, opts = {}) {
+      const res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '请求失败');
+      return data;
+    }
+
+    function render(data) {
+      currentData = data;
+      document.getElementById('ws-input').value = data.workspace || '';
+      const runBadge = document.getElementById('running-badge');
+      runBadge.textContent = data.running_id ? `运行中: ${data.running_id}` : '当前无运行实例';
+
+      const hf = document.getElementById('handoff-status');
+      hf.textContent = data.handoff
+        ? `交接单就绪 (${data.handoff.updated}, ${data.handoff.size_kb} KB)`
+        : '尚未生成 HANDOFF_AUTO.md';
+
+      const readyCount = data.accounts.filter(a => a.health === 'ready').length;
+      const cdCount = data.accounts.filter(a => a.health === 'cooldown').length;
+      document.getElementById('pool-summary').textContent =
+        `共 ${data.accounts.length} 个号 · 满血 ${readyCount} · 冷却 ${cdCount} · 预警阈值 ${data.warn_threshold} 轮/日`;
+
+      const grid = document.getElementById('accounts-grid');
+      grid.innerHTML = data.accounts.map(a => {
+        const pct = Math.min(100, Math.round((a.today_turns / data.warn_threshold) * 100));
+        const barColor = a.health === 'cooldown' ? 'var(--red)' : (a.health === 'warning' ? 'var(--yellow)' : 'var(--green)');
+        const statusText = a.health === 'cooldown'
+          ? `冷却中 (${a.cooldown_remaining_min}m)`
+          : (a.health === 'warning' ? '快满预警' : '满血可用');
+        return `
+          <div class="card ${a.running ? 'is-running' : ''}">
+            <div class="card-head">
+              <div>
+                <div class="acc-name">${a.label}</div>
+                <div class="mono">最近活跃: ${a.latest_active}</div>
+              </div>
+              <span class="pill ${a.health}">${statusText}</span>
+            </div>
+            <div class="metrics">
+              <div>今日轮数<strong>${a.today_turns} 轮</strong></div>
+              <div>今日日志<strong>${a.today_kb} KB</strong></div>
+            </div>
+            <div class="bar"><div class="bar-fill" style="width:${pct}%; background:${barColor}"></div></div>
+            <div class="card-actions">
+              <button class="primary" ${(!a.app_exists || a.running) ? 'disabled' : ''} onclick="smartSwitch('${a.id}')">
+                ${a.running ? '当前使用中' : '切到此号'}
+              </button>
+              ${a.health === 'cooldown'
+                ? `<button onclick="setCooldown('${a.id}', 0)">恢复满血</button>`
+                : `<button class="danger" onclick="setCooldown('${a.id}', 5)">标记冷却</button>`
+              }
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const list = document.getElementById('sessions-list');
+      list.innerHTML = data.sessions.map(s => `
+        <div class="session-row">
+          <div>
+            <strong>${s.account_label}</strong>
+            <span class="mono"> · ${s.conv_id.slice(0, 8)} · ${s.time}</span>
+          </div>
+          <button onclick="runHandoff('${s.path.replace(/'/g, "\\'")}')">抽成 HANDOFF_AUTO.md</button>
+        </div>
+      `).join('') || '<div class="session-row">暂无会话记录</div>';
+    }
+
+    async function refresh() {
+      try {
+        const data = await api('/api/status');
+        render(data);
+      } catch (e) {
+        showToast(e.message, true);
+      }
+    }
+
+    async function saveWorkspace() {
+      const ws = document.getElementById('ws-input').value.trim();
+      try {
+        await api('/api/workspace', { method: 'POST', body: JSON.stringify({ workspace: ws }) });
+        showToast('已更新工作区目录');
+        refresh();
+      } catch (e) { showToast(e.message, true); }
+    }
+
+    async function runHandoff(transcriptPath = '') {
+      try {
+        const res = await api('/api/handoff', {
+          method: 'POST',
+          body: JSON.stringify({ transcript_path: transcriptPath })
+        });
+        showToast(`已生成交接单（${res.turns} 条记录），接力词已复制到剪贴板`);
+        refresh();
+      } catch (e) { showToast(e.message, true); }
+    }
+
+    async function setCooldown(accId, hours) {
+      try {
+        await api('/api/cooldown', {
+          method: 'POST',
+          body: JSON.stringify({ account_id: accId, hours })
+        });
+        showToast(hours > 0 ? `已标记 ${accId} 冷却 ${hours} 小时` : `已恢复 ${accId} 为满血`);
+        refresh();
+      } catch (e) { showToast(e.message, true); }
+    }
+
+    async function smartSwitch(targetId) {
+      const tip = targetId ? `确认切换到 ${targetId}？` : '确认自动生成交接单、退出当前 Antigravity 并切到下一个满血号？';
+      if (!confirm(tip)) return;
+      try {
+        const res = await api('/api/switch', {
+          method: 'POST',
+          body: JSON.stringify({ target_id: targetId, mark_current_cooldown: true })
+        });
+        showToast(`正在切换到 ${res.switched_to}，接力词已复制，切回窗口 Cmd+V 即可`);
+        setTimeout(refresh, 2500);
+      } catch (e) { showToast(e.message, true); }
+    }
+
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+.DS_Store
+.tmp-*.log
+*.pyc
+__pycache__/
+AGY Switch.app/
+macos/icon_1024.png
