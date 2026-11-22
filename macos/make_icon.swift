@@ -105,6 +105,6 @@ guard let tiff = image.tiffRepresentation,
     exit(2)
 }
 
-let outPath = "/Users/tom/Desktop/workspace/agy-switch/macos/icon_1024.png"
+let outPath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon_1024.png"
 try png.write(to: URL(fileURLWithPath: outPath))
 print("ICON_OK:", outPath)

@@ -81,7 +81,15 @@ final class SwitchStore: ObservableObject {
     @Published var isBusy: Bool = false
     @Published var isRefreshing: Bool = false
 
-    private let scriptPath = "/Users/tom/Desktop/workspace/agy-switch/server.py"
+    private var scriptPath: String {
+        if let res = Bundle.main.resourcePath {
+            let bundled = (res as NSString).appendingPathComponent("server.py")
+            if FileManager.default.fileExists(atPath: bundled) {
+                return bundled
+            }
+        }
+        return (NSHomeDirectory() as NSString).appendingPathComponent("Desktop/workspace/agy-switch/server.py")
+    }
 
     init() {
         refresh()

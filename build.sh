@@ -8,7 +8,7 @@ ICONSET="/tmp/AGYSwitch.iconset"
 ICON_PNG="$ROOT_DIR/macos/icon_1024.png"
 
 echo "1/4 生成视网膜图标..."
-swift "$ROOT_DIR/macos/make_icon.swift" >/dev/null
+swift "$ROOT_DIR/macos/make_icon.swift" "$ICON_PNG" >/dev/null
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
 for sz in 16 32 128 256 512; do
@@ -21,6 +21,7 @@ echo "2/4 组装应用包与编译 SwiftUI 原生二进制..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+cp "$ROOT_DIR/server.py" "$APP_BUNDLE/Contents/Resources/server.py"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,7 +31,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'EOF'
   <key>CFBundleExecutable</key>
   <string>AgySwitch</string>
   <key>CFBundleIdentifier</key>
-  <string>com.tom.agyswitch</string>
+  <string>io.agyswitch.app</string>
   <key>CFBundleName</key>
   <string>AGY Switch</string>
   <key>CFBundleVersion</key>
