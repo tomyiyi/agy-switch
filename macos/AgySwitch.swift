@@ -119,6 +119,14 @@ final class SwitchStore: ObservableObject {
     @Published var isBusy: Bool = false
     @Published var isRefreshing: Bool = false
     @Published var autoStartEnabled: Bool = false
+    private var lastAlertedAccount: String = ""
+    private var lastAlertTime: Date = .distantPast
+    private var pollTimer: Timer?
+
+    var isCurrentLowQuota: Bool {
+        guard let active = status?.accounts.first(where: { $0.running }) else { return false }
+        return active.remain_5h_pct <= 15 || active.remain_7d_pct <= 15
+    }
 
     private var scriptPath: String {
         if let res = Bundle.main.resourcePath {
@@ -132,6 +140,27 @@ final class SwitchStore: ObservableObject {
 
     init() {
         refresh()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refresh(showFeedback: false)
+        }
+    }
+
+    private func checkLowQuotaNotification(_ decoded: StatusPayload) {
+        guard let active = decoded.accounts.first(where: { $0.running }) else { return }
+        let low = active.remain_5h_pct <= 15 || active.remain_7d_pct <= 15
+        guard low else { return }
+        let now = Date()
+        if lastAlertedAccount == active.id && now.timeIntervalSince(lastAlertTime) < 1800 {
+            return
+        }
+        lastAlertedAccount = active.id
+        lastAlertTime = now
+        let pct = min(active.remain_5h_pct, active.remain_7d_pct)
+        let msg = "当前账号 \(active.label) 余量仅剩 \(pct)%（≤15%），建议立即打开 AGY Switch 一键接力到满血号！"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", "display notification \"\(msg)\" with title \"AGY Switch · 额度预警\""]
+        try? proc.run()
     }
 
     private func runCLI(_ args: [String]) -> Data? {
@@ -183,6 +212,7 @@ final class SwitchStore: ObservableObject {
             DispatchQueue.main.async {
                 self.status = decoded
                 self.isRefreshing = false
+                self.checkLowQuotaNotification(decoded)
                 if showFeedback {
                     self.showToast("已刷新（\(nowStr)）· 当前：\(decoded.running_id.isEmpty ? "无" : decoded.running_id)")
                 }
@@ -584,6 +614,24 @@ struct DashboardView: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(DS.cardBg).shadow(color: .black.opacity(0.03), radius: 4, y: 1))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(DS.border, lineWidth: 1))
 
+                // 低额度（≤15%）主动预警横幅
+                if let a = activeAcc, (a.remain_5h_pct <= 15 || a.remain_7d_pct <= 15) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(DS.brandOrange)
+                        Text("当前账号 \(a.label) 余量已 ≤ 15%（5h: \(a.remain_5h_pct)% · 周: \(a.remain_7d_pct)%），建议立即接力到满血号避免限流。")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Button("立即接力") { store.switchTo("") }
+                            .buttonStyle(PrimaryPillButtonStyle(compact: true))
+                            .disabled(store.isBusy)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(DS.brandOrange.opacity(0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(DS.brandOrange.opacity(0.4), lineWidth: 1))
+                }
+
                 // Hero 当前活跃账号主卡
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(alignment: .center) {
@@ -715,6 +763,25 @@ struct DashboardView: View {
                         )
                     }
                 }
+
+                // 3 步无缝接力微引导条
+                HStack(spacing: 14) {
+                    Label("如何无缝续上工作：", systemImage: "lightbulb.fill")
+                        .foregroundColor(DS.brandBlue)
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Text("① 点「一键接力」自动保存 HANDOFF_AUTO.md 并退旧号")
+                    Text("→")
+                    Text("② 等 2 秒新号窗口打开同一目录")
+                    Text("→")
+                    Text("③ 对话框直接 Cmd+V 发送接力词")
+                    Spacer()
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(RoundedRectangle(cornerRadius: 10).fill(DS.cardBg))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(DS.border, lineWidth: 1))
             }
             .padding(20)
         }
@@ -1146,7 +1213,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.2")
+                        Text("v3.3")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
