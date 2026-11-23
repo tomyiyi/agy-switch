@@ -460,7 +460,35 @@ struct CompactQuotaMetric: View {
     }
 }
 
-// 3 列网格精致账号卡（悬停微亮 + 底部轻量图标操作栏）
+// 真实本地用量微块（零假百分比，只展示 100% 真实轮数与状态）
+struct RealUsageMetric: View {
+    let title: String
+    let valueText: String
+    let subtext: String
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Text(valueText)
+                .font(.system(size: 14, weight: .bold).monospacedDigit())
+                .foregroundColor(accent)
+                .lineLimit(1)
+            Text(subtext)
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundColor(.secondary.opacity(0.85))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(DS.insetBg))
+    }
+}
+
+// 3 列网格精致账号卡（零假百分比 + 真实登录态 + 家庭组备注）
 struct CockpitStyleAccountCard: View {
     let acc: AccountInfo
     let isBusy: Bool
@@ -475,12 +503,12 @@ struct CockpitStyleAccountCard: View {
 
     var body: some View {
         let badgeColor: Color = acc.running ? DS.brandBlue : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : DS.brandGreen))
-        let badgeText: String = acc.running ? "当前" : (!acc.logged_in ? "待登录" : (acc.health == "cooldown" ? "冷却 \(acc.cooldown_remaining_min)m" : "满血"))
-        let sub5h = acc.reset_5h_min > 0 ? "\(acc.reset_5h_min / 60)h\(acc.reset_5h_min % 60)m 重置" : "\(acc.turns_5h) 轮"
-        let sub7d = acc.calibrated ? "已校准 · \(acc.turns_7d)轮" : "近7天 \(acc.turns_7d) 轮"
+        let badgeText: String = acc.running ? "当前" : (!acc.logged_in ? "待登录" : (acc.health == "cooldown" ? "冷却 \(acc.cooldown_remaining_min)m" : "已登录"))
+        let sub5h = !acc.logged_in ? "需先登录" : (acc.reset_5h_min > 0 ? "\(acc.reset_5h_min / 60)h\(acc.reset_5h_min % 60)m 后重置" : "空闲满血")
+        let sub7d = !acc.logged_in ? "无本地记录" : "活跃 \(acc.latest_active)"
 
         VStack(alignment: .leading, spacing: 10) {
-            // 顶行：账号名 + 状态胶囊
+            // 顶行：账号名 + 真实登录/运行状态胶囊
             HStack(alignment: .center, spacing: 6) {
                 Circle().fill(badgeColor).frame(width: 7, height: 7)
                 Text(acc.label)
@@ -495,13 +523,13 @@ struct CockpitStyleAccountCard: View {
                     .background(Capsule().fill(badgeColor.opacity(0.13)))
             }
 
-            // 备注行（极简低噪音）
+            // 家庭组/备注行
             if let editNote = onEditNote {
                 Button(action: editNote) {
                     HStack(spacing: 4) {
                         Image(systemName: "tag")
                             .font(.system(size: 9.5))
-                        Text(acc.note.isEmpty ? "加备注" : acc.note)
+                        Text(acc.note.isEmpty ? "标家庭组 / 加备注" : acc.note)
                             .font(.system(size: 11))
                             .lineLimit(1)
                     }
@@ -510,31 +538,33 @@ struct CockpitStyleAccountCard: View {
                 .buttonStyle(.plain)
             }
 
-            // 中部：双列微额度容器（左 5h / 右 7d）
+            // 中部：双列 100% 真实本地轮数（不显示假百分比）
             HStack(spacing: 8) {
-                CompactQuotaMetric(title: "5h 窗口", pct: acc.remain_5h_pct, subtext: sub5h, defaultAccent: DS.brandGreen)
-                CompactQuotaMetric(title: "周额度", pct: acc.remain_7d_pct, subtext: sub7d, defaultAccent: DS.brandBlue)
+                RealUsageMetric(
+                    title: "近 5 小时",
+                    valueText: acc.logged_in ? "\(acc.turns_5h) 轮" : "—",
+                    subtext: sub5h,
+                    accent: !acc.logged_in ? .secondary : (acc.turns_5h == 0 ? DS.brandGreen : .primary)
+                )
+                RealUsageMetric(
+                    title: "近 7 天累计",
+                    valueText: acc.logged_in ? "\(acc.turns_7d) 轮" : "—",
+                    subtext: sub7d,
+                    accent: !acc.logged_in ? .secondary : DS.brandBlue
+                )
             }
 
             // 底行：轻量图标栏 + 精致切换胶囊
             HStack(spacing: 8) {
-                if let cal = onCalibrate {
-                    Button(action: cal) {
-                        Image(systemName: "slider.horizontal.3")
+                if acc.logged_in {
+                    Button(action: onToggleCooldown) {
+                        Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake")
                             .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("校准真实剩余额度")
+                    .help(acc.health == "cooldown" ? "恢复可用" : "标记冷却 5 小时")
                 }
-
-                Button(action: onToggleCooldown) {
-                    Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake")
-                        .font(.system(size: 12))
-                        .foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(acc.health == "cooldown" ? "恢复为满血" : "标记冷却 5 小时")
 
                 if acc.id != "main", let del = onDelete {
                     Button(action: del) {
@@ -547,10 +577,6 @@ struct CockpitStyleAccountCard: View {
                 }
 
                 Spacer()
-
-                Text(acc.latest_active)
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary.opacity(0.75))
 
                 Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) {
                     onSwitch()
@@ -695,17 +721,17 @@ struct DashboardView: View {
 
                     if let a = activeAcc {
                         HStack(spacing: 12) {
-                            CompactQuotaMetric(
-                                title: a.calibrated ? "5小时窗口 · 已校准" : "5小时窗口 · 本地估算",
-                                pct: a.remain_5h_pct,
-                                subtext: "近 5h 已用 \(a.turns_5h) 轮",
-                                defaultAccent: DS.brandGreen
+                            RealUsageMetric(
+                                title: "近 5 小时对话",
+                                valueText: "\(a.turns_5h) 轮",
+                                subtext: a.reset_5h_min > 0 ? "\(a.reset_5h_min / 60)h\(a.reset_5h_min % 60)m 后滚动重置" : "空闲状态",
+                                accent: a.turns_5h == 0 ? DS.brandGreen : .primary
                             )
-                            CompactQuotaMetric(
-                                title: a.calibrated ? "本周额度 7d · 已校准" : "本周额度 7d · 本地估算",
-                                pct: a.remain_7d_pct,
-                                subtext: "近 7d 累计 \(a.turns_7d) 轮",
-                                defaultAccent: DS.brandBlue
+                            RealUsageMetric(
+                                title: "近 7 天累计",
+                                valueText: "\(a.turns_7d) 轮",
+                                subtext: a.note.isEmpty ? "精确余量请看 Antigravity 右下角弹窗" : "分组/备注：\(a.note)",
+                                accent: DS.brandBlue
                             )
                         }
                     }
@@ -1441,7 +1467,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.6")
+                        Text("v4.0")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
