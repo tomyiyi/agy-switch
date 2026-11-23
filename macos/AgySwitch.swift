@@ -13,6 +13,8 @@ struct AccountInfo: Decodable, Identifiable {
     let app_exists: Bool
     let running: Bool
     let pid: Int
+    let running_ide: Bool?
+    let ide_pid: Int?
     let health: String
     let turns_5h: Int
     let limit_5h: Int
@@ -239,6 +241,19 @@ final class SwitchStore: ObservableObject {
         }
     }
 
+    func launchIDE(_ accId: String) {
+        isBusy = true
+        showToast("正在用 \(accId) 启动 Antigravity IDE（保留当前 Antigravity）...")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.runCLI(["--cli-launch-ide", accId])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self?.isBusy = false
+                self?.showToast("已用 \(accId) 启动 Antigravity IDE")
+                self?.refresh()
+            }
+        }
+    }
+
     func switchTo(_ targetId: String) {
         isBusy = true
         showToast(targetId.isEmpty ? "正在生成交接单并切到下一个满血号..." : "正在切换到 \(targetId)...")
@@ -418,6 +433,7 @@ struct CockpitStyleAccountCard: View {
     let acc: AccountInfo
     let isBusy: Bool
     let onSwitch: () -> Void
+    var onLaunchIDE: (() -> Void)? = nil
     let onToggleCooldown: () -> Void
     var onEditNote: (() -> Void)? = nil
     var onCalibrate: (() -> Void)? = nil
@@ -439,6 +455,14 @@ struct CockpitStyleAccountCard: View {
                     .font(.system(size: 13.5, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
+                if acc.running_ide == true {
+                    Text("IDE")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.purple)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.purple.opacity(0.14)))
+                }
                 Text(badgeText)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundColor(badgeColor)
@@ -503,6 +527,15 @@ struct CockpitStyleAccountCard: View {
                 Text(acc.latest_active)
                     .font(.system(size: 10.5))
                     .foregroundColor(.secondary.opacity(0.75))
+
+                if let ideAction = onLaunchIDE {
+                    Button(acc.running_ide == true ? "IDE中" : "IDE") {
+                        ideAction()
+                    }
+                    .buttonStyle(SubtlePillButtonStyle())
+                    .disabled(acc.running_ide == true || isBusy)
+                    .help("用此账号启动 Antigravity IDE（不影响当前 Antigravity，错号安全双开）")
+                }
 
                 Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) {
                     onSwitch()
@@ -694,6 +727,7 @@ struct DashboardView: View {
                             acc: acc,
                             isBusy: store.isBusy,
                             onSwitch: { store.switchTo(acc.id) },
+                            onLaunchIDE: { store.launchIDE(acc.id) },
                             onToggleCooldown: { store.setCooldown(acc.id, hours: 5) }
                         )
                     }
@@ -777,6 +811,7 @@ struct AccountsView: View {
                             acc: acc,
                             isBusy: store.isBusy,
                             onSwitch: { store.switchTo(acc.id) },
+                            onLaunchIDE: { store.launchIDE(acc.id) },
                             onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
                             onEditNote: {
                                 editingNoteAcc = acc
@@ -1128,7 +1163,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.0")
+                        Text("v3.1")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }

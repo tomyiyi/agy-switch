@@ -58,6 +58,79 @@ def natural_sort_key(name: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
 
 
+def detect_running_ide_instance():
+    """检测当前正在运行的 Antigravity IDE 属于哪个实例，返回 (instance_id, pid)"""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,command"], text=True, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        return "", 0
+    found_main = None
+    for line in out.splitlines():
+        if "--type=" in line:
+            continue
+        if "Antigravity IDE.app/Contents/MacOS" in line:
+            parts = line.strip().split(None, 1)
+            pid = int(parts[0]) if parts and parts[0].isdigit() else 0
+            m_dir = re.search(r"\.antigravity_multi_instances/([^/\s\"']+)", line)
+            if m_dir:
+                return m_dir.group(1), pid
+            if found_main is None:
+                found_main = ("main", pid)
+    return found_main if found_main else ("", 0)
+
+
+def launch_ide_for_account(acc_id: str, workspace: str = ""):
+    """用指定账号隔离环境启动 Antigravity IDE（不关闭 Antigravity 主客户端，实现双 App 错号并行）"""
+    ide_bin = "/Applications/Antigravity IDE.app/Contents/MacOS/Electron"
+    if not os.path.exists(ide_bin):
+        raise ValueError("未在本机 /Applications 找到 Antigravity IDE.app")
+
+    # 只优雅退出旧的 Antigravity IDE，不动 Antigravity 主客户端
+    try:
+        subprocess.run(
+            ["osascript", "-e", 'tell application "Antigravity IDE" to quit'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+        )
+    except Exception:
+        pass
+    for _ in range(16):
+        rid, _ = detect_running_ide_instance()
+        if not rid:
+            break
+        time.sleep(0.25)
+
+    if acc_id == "main":
+        cmd = ["open", "-a", "/Applications/Antigravity IDE.app"]
+        if workspace and os.path.isdir(workspace):
+            cmd.append(workspace)
+        subprocess.Popen(cmd)
+    else:
+        inst_dir = MULTI_DIR / acc_id
+        ide_data = inst_dir / "ide-data"
+        ide_data.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["HOME"] = str(inst_dir)
+        env["USERPROFILE"] = str(inst_dir)
+        cmd = [ide_bin, f"--user-data-dir={ide_data}"]
+        if workspace and os.path.isdir(workspace):
+            cmd.append(workspace)
+        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    try:
+        msg = f"已用 {acc_id} 启动 Antigravity IDE（不影响当前 Antigravity）"
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{msg}" with title "AGY Switch"'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def detect_running_instance():
     """检测当前正在运行的 Antigravity 属于哪个实例，返回 (instance_id, pid)"""
     try:
@@ -158,6 +231,7 @@ def scan_account_metrics(gemini_dir: Path):
 
 def list_accounts(state: dict):
     running_id, running_pid = detect_running_instance()
+    running_ide_id, running_ide_pid = detect_running_ide_instance()
     now = time.time()
     cooldowns = state.get("cooldowns", {})
     accounts = []
@@ -235,6 +309,8 @@ def list_accounts(state: dict):
             "app_exists": os.path.exists(app_path),
             "running": running_id == acc_id,
             "pid": running_pid if running_id == acc_id else 0,
+            "running_ide": running_ide_id == acc_id,
+            "ide_pid": running_ide_pid if running_ide_id == acc_id else 0,
             "health": health,
             "turns_5h": metrics["turns_5h"],
             "limit_5h": limit_5h,
@@ -847,6 +923,7 @@ def main():
     parser.add_argument("--cli-handoff-save", nargs=2, metavar=("TRANSCRIPT", "NOTE"), help="按指定日志与特别交代生成交接单")
     parser.add_argument("--cli-config", nargs=3, metavar=("WORKSPACE", "LIMIT_5H", "LIMIT_7D"), help="更新工作区与预警阈值")
     parser.add_argument("--cli-switch", nargs="?", const="", default=None, help="一键切换账号（空串=自动选满血号）")
+    parser.add_argument("--cli-launch-ide", metavar="ACC_ID", help="用指定账号启动 Antigravity IDE（双 App 错号并行）")
     parser.add_argument("--cli-cooldown", nargs=2, metavar=("ACC_ID", "HOURS"), help="设置账号冷却小时数（0=恢复满血）")
     parser.add_argument("--cli-clear-cooldowns", action="store_true", help="一键解除全部账号冷却")
     parser.add_argument("--cli-restore-handoff", metavar="FILENAME", help="从 .handoff_history 恢复指定交接单")
@@ -1047,6 +1124,15 @@ def main():
             state.setdefault("cooldowns", {})[acc_id] = time.time() + hours * 3600
         save_state(state)
         print(json.dumps({"ok": True}, ensure_ascii=False))
+        return
+
+    if args.cli_launch_ide:
+        try:
+            ws = state.get("workspace", DEFAULT_WORKSPACE)
+            launch_ide_for_account(args.cli_launch_ide, ws)
+            print(json.dumps({"ok": True, "ide_account": args.cli_launch_ide}, ensure_ascii=False))
+        except Exception as e:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False))
         return
 
     if args.cli_switch is not None:
