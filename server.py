@@ -271,10 +271,11 @@ def list_accounts(state: dict):
         remaining_min = int((cd_until - now) / 60) + 1 if in_cooldown else 0
 
         if acc_id == "main":
-            logged_in = (HOME / ".gemini" / "antigravity").exists()
+            tok = HOME / ".gemini" / "jetski-standalone-oauth-token"
+            logged_in = (tok.exists() and tok.stat().st_size > 0) or (HOME / ".gemini" / "antigravity").exists()
         else:
-            vscdb = MULTI_DIR / acc_id / "data" / "User" / "globalStorage" / "state.vscdb"
-            logged_in = vscdb.exists() and vscdb.stat().st_size > 0
+            tok = MULTI_DIR / acc_id / ".gemini" / "jetski-standalone-oauth-token"
+            logged_in = tok.exists() and tok.stat().st_size > 0
 
         cal = calibrations.get(acc_id)
         if cal:

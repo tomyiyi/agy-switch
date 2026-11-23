@@ -1441,7 +1441,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.5")
+                        Text("v3.6")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
