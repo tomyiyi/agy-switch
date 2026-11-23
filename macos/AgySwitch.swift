@@ -791,10 +791,90 @@ struct DashboardView: View {
     }
 }
 
-// MARK: - 2. 账号池页（3 列紧凑网格 + 增删改备注 + 校准）
+// 紧凑小卡片（高密度模式，一屏看 12+ 个号）
+struct CompactMiniAccountCard: View {
+    let acc: AccountInfo
+    let isBusy: Bool
+    let onSwitch: () -> Void
+
+    var body: some View {
+        let dotColor: Color = acc.running ? DS.brandBlue : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : DS.brandGreen))
+        let c5: Color = acc.remain_5h_pct <= 15 ? DS.brandRed : (acc.remain_5h_pct <= 35 ? DS.brandOrange : DS.brandGreen)
+        let c7: Color = acc.remain_7d_pct <= 15 ? DS.brandRed : (acc.remain_7d_pct <= 35 ? DS.brandOrange : DS.brandBlue)
+
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Circle().fill(dotColor).frame(width: 6.5, height: 6.5)
+                Text(acc.label).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                Spacer()
+                if acc.running {
+                    Text("当前").font(.system(size: 9.5, weight: .bold)).foregroundColor(DS.brandBlue)
+                }
+            }
+            HStack(spacing: 8) {
+                Text("5h \(acc.remain_5h_pct)%").font(.system(size: 11, weight: .bold).monospacedDigit()).foregroundColor(c5)
+                Text("·").foregroundColor(.secondary)
+                Text("周 \(acc.remain_7d_pct)%").font(.system(size: 11, weight: .bold).monospacedDigit()).foregroundColor(c7)
+                Spacer()
+                Button(acc.running ? "使用中" : "切换") { onSwitch() }
+                    .buttonStyle(PrimaryPillButtonStyle(compact: true))
+                    .disabled(acc.running || !acc.app_exists || isBusy)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(DS.cardBg).shadow(color: .black.opacity(0.03), radius: 4, y: 1))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(acc.running ? DS.brandBlue.opacity(0.6) : DS.border, lineWidth: acc.running ? 1.5 : 1))
+    }
+}
+
+// 横向列表行（表格模式）
+struct AccountListRow: View {
+    let acc: AccountInfo
+    let isBusy: Bool
+    let onSwitch: () -> Void
+    let onToggleCooldown: () -> Void
+    let onCalibrate: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        let dotColor: Color = acc.running ? DS.brandBlue : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : DS.brandGreen))
+
+        HStack(spacing: 14) {
+            HStack(spacing: 8) {
+                Circle().fill(dotColor).frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(acc.label).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(acc.note.isEmpty ? acc.latest_active : acc.note).font(.system(size: 10.5)).foregroundColor(.secondary).lineLimit(1)
+                }
+            }
+            .frame(width: 190, alignment: .leading)
+
+            CompactQuotaMetric(title: "5h 窗口", pct: acc.remain_5h_pct, subtext: "\(acc.turns_5h) 轮", defaultAccent: DS.brandGreen)
+            CompactQuotaMetric(title: "周额度", pct: acc.remain_7d_pct, subtext: "近7天 \(acc.turns_7d) 轮", defaultAccent: DS.brandBlue)
+
+            HStack(spacing: 10) {
+                Button(action: onCalibrate) { Image(systemName: "slider.horizontal.3").foregroundColor(.secondary) }.buttonStyle(.plain)
+                Button(action: onToggleCooldown) { Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake").foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary) }.buttonStyle(.plain)
+                if acc.id != "main" {
+                    Button(action: onDelete) { Image(systemName: "trash").foregroundColor(.secondary) }.buttonStyle(.plain)
+                }
+                Button(acc.running ? "使用中" : "切换") { onSwitch() }
+                    .buttonStyle(PrimaryPillButtonStyle(compact: true))
+                    .disabled(acc.running || !acc.app_exists || isBusy)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 11).fill(DS.cardBg).shadow(color: .black.opacity(0.03), radius: 4, y: 1))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(acc.running ? DS.brandBlue.opacity(0.6) : DS.border, lineWidth: acc.running ? 1.5 : 1))
+    }
+}
+
+// MARK: - 2. 账号池页（支持网格/紧凑/列表 3 种排列 + 增删改备注 + 校准）
 struct AccountsView: View {
     @ObservedObject var store: SwitchStore
     @State private var filter: String = "all"
+    @State private var layoutMode: String = UserDefaults.standard.string(forKey: "agy_layout") ?? "grid"
     @State private var searchText: String = ""
     @State private var showAddSheet: Bool = false
     @State private var newAccId: String = ""
@@ -822,6 +902,18 @@ struct AccountsView: View {
                 TextField("搜索账号名或备注...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 190)
+
+                Picker("", selection: $layoutMode) {
+                    Image(systemName: "square.grid.2x2").tag("grid")
+                    Image(systemName: "square.grid.3x3").tag("compact")
+                    Image(systemName: "list.bullet").tag("list")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 108)
+                .onChange(of: layoutMode) { _, newVal in
+                    UserDefaults.standard.set(newVal, forKey: "agy_layout")
+                }
+                .help("切换排列方式：标准网格 / 紧凑高密度 / 横向列表")
 
                 Picker("", selection: $filter) {
                     Text("全部 (\(all.count))").tag("all")
@@ -857,29 +949,62 @@ struct AccountsView: View {
             .padding(.top, 16)
 
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 250, maximum: 340), spacing: 12)], spacing: 12) {
-                    ForEach(filtered) { acc in
-                        CockpitStyleAccountCard(
-                            acc: acc,
-                            isBusy: store.isBusy,
-                            onSwitch: { store.switchTo(acc.id) },
-                            onLaunchIDE: { store.launchIDE(acc.id) },
-                            onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
-                            onEditNote: {
-                                editingNoteAcc = acc
-                                editingNoteText = acc.note
-                            },
-                            onCalibrate: {
-                                calibratingAcc = acc
-                                calAcc5h = Double(acc.remain_5h_pct)
-                                calAcc7d = Double(acc.remain_7d_pct)
-                            },
-                            onDelete: { deletingAcc = acc }
-                        )
+                if layoutMode == "list" {
+                    LazyVStack(spacing: 8) {
+                        ForEach(filtered) { acc in
+                            AccountListRow(
+                                acc: acc,
+                                isBusy: store.isBusy,
+                                onSwitch: { store.switchTo(acc.id) },
+                                onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
+                                onCalibrate: {
+                                    calibratingAcc = acc
+                                    calAcc5h = Double(acc.remain_5h_pct)
+                                    calAcc7d = Double(acc.remain_7d_pct)
+                                },
+                                onDelete: { deletingAcc = acc }
+                            )
+                        }
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                } else if layoutMode == "compact" {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 185, maximum: 240), spacing: 10)], spacing: 10) {
+                        ForEach(filtered) { acc in
+                            CompactMiniAccountCard(
+                                acc: acc,
+                                isBusy: store.isBusy,
+                                onSwitch: { store.switchTo(acc.id) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 250, maximum: 340), spacing: 12)], spacing: 12) {
+                        ForEach(filtered) { acc in
+                            CockpitStyleAccountCard(
+                                acc: acc,
+                                isBusy: store.isBusy,
+                                onSwitch: { store.switchTo(acc.id) },
+                                onLaunchIDE: { store.launchIDE(acc.id) },
+                                onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
+                                onEditNote: {
+                                    editingNoteAcc = acc
+                                    editingNoteText = acc.note
+                                },
+                                onCalibrate: {
+                                    calibratingAcc = acc
+                                    calAcc5h = Double(acc.remain_5h_pct)
+                                    calAcc7d = Double(acc.remain_7d_pct)
+                                },
+                                onDelete: { deletingAcc = acc }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 20)
             }
         }
         .background(DS.canvasBg)
@@ -1316,7 +1441,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.4")
+                        Text("v3.5")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
