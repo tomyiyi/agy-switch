@@ -73,7 +73,8 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case accounts = "账号池"
     case handoff = "交接中心"
     case doctor = "运行体检"
-    case settings = "设置"
+    case settings = "通用设置"
+    case about = "关于"
 
     var id: String { rawValue }
     var icon: String {
@@ -82,7 +83,8 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .accounts: return "person.2.fill"
         case .handoff: return "doc.text.fill"
         case .doctor: return "stethoscope"
-        case .settings: return "gearshape.fill"
+        case .settings: return "slider.horizontal.3"
+        case .about: return "info.circle.fill"
         }
     }
 }
@@ -1103,15 +1105,37 @@ struct DoctorView: View {
     }
 }
 
-// MARK: - 5. 设置页
+// MARK: - 5. 通用设置页
 struct SettingsView: View {
     @ObservedObject var store: SwitchStore
     @State private var workspace: String = ""
-    @State private var limit5h: Int = 80
-    @State private var limit7d: Int = 400
+    @State private var limit5h: Int = 200
+    @State private var limit7d: Int = 1000
+    @State private var themeMode: String = UserDefaults.standard.string(forKey: "agy_theme") ?? "system"
+
+    private func applyTheme(_ mode: String) {
+        UserDefaults.standard.set(mode, forKey: "agy_theme")
+        switch mode {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+    }
 
     var body: some View {
         Form {
+            Section("外观") {
+                Picker("明暗主题", selection: $themeMode) {
+                    Text("跟随系统").tag("system")
+                    Text("浅色").tag("light")
+                    Text("深色").tag("dark")
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: themeMode) { newVal in
+                    applyTheme(newVal)
+                }
+            }
+
             Section("常用接力工作区（多项目一键切换）") {
                 ForEach(store.status?.workspaces ?? [workspace], id: \.self) { wsPath in
                     HStack {
@@ -1188,6 +1212,85 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - 6. 关于页（对标 CC Switch 风格）
+struct AboutView: View {
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(LinearGradient(colors: [DS.brandBlue, Color.cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 48, height: 48)
+                            Image(systemName: "bolt.fill")
+                                .font(.title2)
+                                .foregroundColor(.white)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("AGY Switch").font(.title3.bold())
+                            Text("版本 v3.4.0 · macOS 原生多账号串行接力工具")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("检查更新") {
+                            if let url = URL(string: "https://github.com/tomyiyi/agy-switch/commits/main") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(PrimaryPillButtonStyle(compact: true))
+                    }
+                    .padding(18)
+
+                    Divider()
+
+                    HStack(spacing: 10) {
+                        Button("GitHub 仓库") {
+                            if let url = URL(string: "https://github.com/tomyiyi/agy-switch") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(SubtlePillButtonStyle())
+
+                        Button("更新日志 (CHANGELOG)") {
+                            if let url = URL(string: "https://github.com/tomyiyi/agy-switch/blob/main/CHANGELOG.md") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(SubtlePillButtonStyle())
+
+                        Spacer()
+                    }
+                    .padding(14)
+
+                    Divider()
+
+                    HStack {
+                        Label("如果 AGY Switch 帮到了你，欢迎在 GitHub 点个 Star ⭐", systemImage: "star.fill")
+                            .font(.caption)
+                            .foregroundColor(DS.brandOrange)
+                        Spacer()
+                        Button("去点 Star") {
+                            if let url = URL(string: "https://github.com/tomyiyi/agy-switch") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(SubtlePillButtonStyle())
+                    }
+                    .padding(14)
+                    .background(DS.brandOrange.opacity(0.08))
+                }
+                .background(RoundedRectangle(cornerRadius: 14).fill(DS.cardBg).shadow(color: .black.opacity(0.04), radius: 8, y: 2))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(DS.border, lineWidth: 1))
+                .frame(maxWidth: 620)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(28)
+        }
+        .background(DS.canvasBg)
+    }
+}
+
 // MARK: - 主框架
 struct MainRootView: View {
     @ObservedObject var store: SwitchStore
@@ -1213,7 +1316,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.3")
+                        Text("v3.4")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
@@ -1230,6 +1333,7 @@ struct MainRootView: View {
                     case .handoff: HandoffView(store: store)
                     case .doctor: DoctorView(store: store)
                     case .settings: SettingsView(store: store)
+                    case .about: AboutView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
