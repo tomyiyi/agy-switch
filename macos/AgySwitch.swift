@@ -455,14 +455,6 @@ struct CockpitStyleAccountCard: View {
                     .font(.system(size: 13.5, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
-                if acc.running_ide == true {
-                    Text("IDE")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.purple)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.purple.opacity(0.14)))
-                }
                 Text(badgeText)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundColor(badgeColor)
@@ -527,15 +519,6 @@ struct CockpitStyleAccountCard: View {
                 Text(acc.latest_active)
                     .font(.system(size: 10.5))
                     .foregroundColor(.secondary.opacity(0.75))
-
-                if let ideAction = onLaunchIDE {
-                    Button(acc.running_ide == true ? "IDE中" : "IDE") {
-                        ideAction()
-                    }
-                    .buttonStyle(SubtlePillButtonStyle())
-                    .disabled(acc.running_ide == true || isBusy)
-                    .help("用此账号启动 Antigravity IDE（不影响当前 Antigravity，错号安全双开）")
-                }
 
                 Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) {
                     onSwitch()
@@ -1163,7 +1146,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v3.1")
+                        Text("v3.2")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
