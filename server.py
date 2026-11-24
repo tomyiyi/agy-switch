@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0"
 
 _raw_home = str(Path.home())
 HOME = (
@@ -661,6 +661,123 @@ def sync_conversations(source_id: str, target_id: str):
             pass
 
 
+def unify_shared_assets() -> dict:
+    """
+    一键无损合流并全池共享 Skills / Plugins / Rules：
+    1. 将旧 ~/.gemini/antigravity/skills 及各隔离账号独有的 skills 无损合入唯一真相源 ~/.gemini/config/skills；
+    2. 将各隔离账号独有的官方 plugins 与 rules 无损合入 ~/.gemini/config/{plugins,rules}；
+    3. 统一将 ~/.gemini/antigravity/skills 与全部隔离实例的 skills / plugins / rules 软链指向主目录；
+    4. 增量合并 config.json 中的 plugins 注册表（保留各账号独立 userSettings 与 0600 权限，绝不触碰任何 OAuth 凭据）。
+    """
+    canon_cfg = HOME / ".gemini" / "config"
+    canon_skills = canon_cfg / "skills"
+    canon_plugins = canon_cfg / "plugins"
+    canon_rules = canon_cfg / "rules"
+    for d in (canon_skills, canon_plugins, canon_rules):
+        d.mkdir(parents=True, exist_ok=True)
+
+    bak_root = STATE_DIR / "asset_merge_backups" / datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _link_to_canon(target_path: Path, canon_dir: Path, tag: str):
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.is_symlink():
+            try:
+                if target_path.resolve() == canon_dir.resolve():
+                    return
+            except Exception:
+                pass
+            target_path.unlink()
+        elif target_path.exists() and target_path.is_dir():
+            if target_path.resolve() == canon_dir.resolve():
+                return
+            for item in list(target_path.iterdir()):
+                dst_item = canon_dir / item.name
+                if not dst_item.exists():
+                    try:
+                        shutil.move(str(item), str(dst_item))
+                    except Exception:
+                        pass
+            remaining = list(target_path.iterdir())
+            if remaining:
+                bak_dir = bak_root / tag
+                bak_dir.parent.mkdir(parents=True, exist_ok=True)
+                target_path.rename(bak_dir)
+            else:
+                target_path.rmdir()
+        elif target_path.exists():
+            bak_dir = bak_root / tag
+            bak_dir.parent.mkdir(parents=True, exist_ok=True)
+            target_path.rename(bak_dir)
+        target_path.symlink_to(canon_dir)
+
+    # 1. 合流旧版 ~/.gemini/antigravity/skills
+    legacy_skills = HOME / ".gemini" / "antigravity" / "skills"
+    if legacy_skills.exists() or legacy_skills.is_symlink():
+        _link_to_canon(legacy_skills, canon_skills, "legacy_antigravity_skills")
+
+    # 2. 遍历全部隔离实例，合流并软链 skills / plugins / rules + 公共 npm 缓存
+    inst_dirs = [d for d in MULTI_DIR.iterdir() if d.is_dir()] if MULTI_DIR.exists() else []
+    npm_cache = HOME / ".npm"
+    for inst in inst_dirs:
+        _link_to_canon(inst / ".gemini" / "config" / "skills", canon_skills, f"{inst.name}_skills")
+        _link_to_canon(inst / ".gemini" / "config" / "plugins", canon_plugins, f"{inst.name}_plugins")
+        _link_to_canon(inst / ".gemini" / "config" / "rules", canon_rules, f"{inst.name}_rules")
+        inst_npm = inst / ".npm"
+        if npm_cache.exists() and not inst_npm.exists() and not inst_npm.is_symlink():
+            try:
+                inst_npm.symlink_to(npm_cache)
+            except Exception:
+                pass
+
+    # 3. 增量合流各账号 config.json 中的 plugins 启用注册表
+    cfg_paths = [canon_cfg / "config.json"] + [d / ".gemini" / "config" / "config.json" for d in inst_dirs]
+    merged_plugins = {}
+    for cp in cfg_paths:
+        if cp.is_file():
+            try:
+                obj = json.loads(cp.read_text(encoding="utf-8"))
+                if isinstance(obj, dict) and isinstance(obj.get("plugins"), dict):
+                    for pk, pv in obj["plugins"].items():
+                        if isinstance(pv, dict):
+                            cur = merged_plugins.setdefault(pk, {})
+                            cur.update(pv)
+            except Exception:
+                pass
+
+    if merged_plugins:
+        for cp in cfg_paths:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            doc = {}
+            if cp.is_file():
+                try:
+                    loaded = json.loads(cp.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        doc = loaded
+                except Exception:
+                    doc = {}
+            cur_p = doc.get("plugins") if isinstance(doc.get("plugins"), dict) else {}
+            changed = False
+            for pk, pv in merged_plugins.items():
+                if pk not in cur_p:
+                    cur_p[pk] = dict(pv)
+                    changed = True
+            if changed or not cp.exists():
+                doc["plugins"] = cur_p
+                tmp = cp.parent / f".config.json.{os.getpid()}.tmp"
+                tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, cp)
+
+    skill_cnt = len([p for p in canon_skills.iterdir() if p.is_dir() and not p.name.startswith(".")])
+    plugin_cnt = len([p for p in canon_plugins.iterdir() if p.is_dir() and not p.name.startswith(".")])
+    return {
+        "ok": True,
+        "instances_synced": len(inst_dirs),
+        "skills_count": skill_cnt,
+        "plugins_count": plugin_cnt,
+    }
+
+
 def perform_switch(target_app: str, target_label: str, source_id: str = "", target_id: str = "") -> None:
     """
     安全切号编排（在 state_lock 之外运行，不阻塞状态查询）：
@@ -702,6 +819,7 @@ def perform_switch(target_app: str, target_label: str, source_id: str = "", targ
 
     if target_id:
         try:
+            unify_shared_assets()
             sync_conversations(source_id or "main", target_id)
         except Exception:
             pass
@@ -722,15 +840,17 @@ def add_account(acc_id: str, note: str, state: dict) -> dict:
 
     (inst_dir / ".gemini" / "config").mkdir(parents=True, exist_ok=True)
     (inst_dir / "data").mkdir(parents=True, exist_ok=True)
-    for rel in [".zshrc", ".zprofile", ".gitconfig", ".ssh", ".local", ".visionpower", ".config"]:
+    for rel in [".zshrc", ".zprofile", ".gitconfig", ".ssh", ".local", ".visionpower", ".config", ".npm"]:
         src = HOME / rel
         dst = inst_dir / rel
-        if src.exists() and not dst.exists():
+        if src.exists() and not dst.exists() and not dst.is_symlink():
             os.symlink(str(src), str(dst))
-    skills_src = HOME / ".gemini" / "config" / "skills"
-    skills_dst = inst_dir / ".gemini" / "config" / "skills"
-    if skills_src.exists() and not skills_dst.exists():
-        os.symlink(str(skills_src), str(skills_dst))
+    for cfg_sub in ("skills", "plugins", "rules"):
+        c_src = HOME / ".gemini" / "config" / cfg_sub
+        c_src.mkdir(parents=True, exist_ok=True)
+        c_dst = inst_dir / ".gemini" / "config" / cfg_sub
+        if not c_dst.exists() and not c_dst.is_symlink():
+            os.symlink(str(c_src), str(c_dst))
 
     macos_dir = app_bundle / "Contents" / "MacOS"
     macos_dir.mkdir(parents=True, exist_ok=True)
@@ -824,11 +944,38 @@ def run_doctor(state: dict) -> dict:
     else:
         checks.append({"name": "多开启动器 (.app)", "status": "error", "detail": f"缺少启动器: {', '.join(missing_apps[:3])}"})
 
-    broken_links = [d.name for d in inst_dirs if not (d / ".gemini" / "config" / "skills").exists()]
-    if not broken_links:
-        checks.append({"name": "公共环境与 Skills 软链", "status": "ok", "detail": f"全部 {len(inst_dirs)} 个隔离实例已正常软链公共 Skills"})
+    canon_skills_real = (HOME / ".gemini" / "config" / "skills").resolve()
+    canon_plugins_real = (HOME / ".gemini" / "config" / "plugins").resolve()
+    misaligned_skills = [
+        d.name for d in inst_dirs
+        if not (d / ".gemini" / "config" / "skills").exists()
+        or (d / ".gemini" / "config" / "skills").resolve() != canon_skills_real
+    ]
+    misaligned_plugins = [
+        d.name for d in inst_dirs
+        if not (d / ".gemini" / "config" / "plugins").exists()
+        or (d / ".gemini" / "config" / "plugins").resolve() != canon_plugins_real
+    ]
+    skill_cnt = len([p for p in canon_skills_real.iterdir() if p.is_dir() and not p.name.startswith(".")]) if canon_skills_real.exists() else 0
+    plugin_cnt = len([p for p in canon_plugins_real.iterdir() if p.is_dir() and not p.name.startswith(".")]) if canon_plugins_real.exists() else 0
+
+    if not misaligned_skills and not misaligned_plugins:
+        checks.append({
+            "name": "全账号 Skills 与官方插件共享",
+            "status": "ok",
+            "detail": f"全部 {len(inst_dirs)} 个隔离实例已统一共享 {skill_cnt} 个 Skills 与 {plugin_cnt} 个官方插件",
+        })
     else:
-        checks.append({"name": "公共环境与 Skills 软链", "status": "warn", "detail": f"{len(broken_links)} 个实例缺少 Skills 软链: {', '.join(broken_links[:3])}"})
+        issues = []
+        if misaligned_skills:
+            issues.append(f"Skills 未统一({len(misaligned_skills)}个)")
+        if misaligned_plugins:
+            issues.append(f"Plugins 未共享({len(misaligned_plugins)}个)")
+        checks.append({
+            "name": "全账号 Skills 与官方插件共享",
+            "status": "warn",
+            "detail": f"检测到 {', '.join(issues)}，点击右上角「一键对齐 Skills 与插件」即可全池打通",
+        })
 
     ws = Path(state.get("workspace", DEFAULT_WORKSPACE))
     hf = ws / "HANDOFF_AUTO.md"
@@ -884,6 +1031,7 @@ def main():
     parser = argparse.ArgumentParser(description="AGY Switch v5.0 CLI Engine")
     parser.add_argument("--cli-status", action="store_true", help="输出当前账号池状态 JSON")
     parser.add_argument("--cli-doctor", action="store_true", help="输出本地运行环境体检 JSON")
+    parser.add_argument("--cli-sync-assets", action="store_true", help="一键合流并全池共享 Skills / Plugins / Rules")
     parser.add_argument("--cli-add", nargs=2, metavar=("ACC_ID", "NOTE"), help="新增隔离账号实例与启动器")
     parser.add_argument("--cli-delete", metavar="ACC_ID", help="安全删除隔离账号（移入废纸篓）")
     parser.add_argument("--cli-note", nargs=2, metavar=("ACC_ID", "NOTE"), help="更新账号备注")
@@ -937,6 +1085,11 @@ def main():
         if args.cli_doctor:
             state = _read_state_snapshot()
             print(json.dumps(run_doctor(state), ensure_ascii=False))
+            return
+
+        if args.cli_sync_assets:
+            with state_lock(shared=False):
+                print(json.dumps(unify_shared_assets(), ensure_ascii=False))
             return
 
         if args.cli_status:

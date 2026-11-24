@@ -1,7 +1,7 @@
 import Cocoa
 import SwiftUI
 
-let APP_VERSION = "5.0.0"
+let APP_VERSION = "5.1.0"
 
 struct AccountInfo: Decodable, Identifiable {
     let id: String

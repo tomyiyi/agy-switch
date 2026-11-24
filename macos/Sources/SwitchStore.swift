@@ -150,6 +150,33 @@ final class SwitchStore: ObservableObject {
         }
     }
 
+    func syncSharedAssets() {
+        DispatchQueue.main.async { self.isBusy = true }
+        cliQueue.async { [weak self] in
+            guard let self = self else { return }
+            let res = self.runCLISync(["--cli-sync-assets"])
+            guard res.exitCode == 0,
+                  let data = res.data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["error"] == nil else {
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.showToast("对齐失败，请检查目录权限")
+                }
+                return
+            }
+            let sc = obj["skills_count"] as? Int ?? 0
+            let pc = obj["plugins_count"] as? Int ?? 0
+            let ic = obj["instances_synced"] as? Int ?? 0
+            DispatchQueue.main.async {
+                self.isBusy = false
+                self.showToast("已全池打通：\(ic) 个隔离号共享 \(sc) 个 Skills 与 \(pc) 个插件")
+                self.runDoctor()
+                self.refresh()
+            }
+        }
+    }
+
     func refresh(showFeedback: Bool = false) {
         DispatchQueue.main.async { self.isRefreshing = true }
         cliQueue.async { [weak self] in

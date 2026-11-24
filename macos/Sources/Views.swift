@@ -754,6 +754,13 @@ struct DoctorView: View {
                         .font(.caption).foregroundColor(.secondary)
                 }
                 Spacer()
+                Button(action: { store.syncSharedAssets() }) {
+                    Label("一键对齐 Skills 与插件", systemImage: "square.stack.3d.up.fill")
+                }
+                .buttonStyle(SubtlePillButtonStyle())
+                .disabled(store.isBusy)
+                .help("将主号与全部隔离号的 Skills、官方插件与 Rules 合流到单一主目录并全池软链共享")
+
                 Button("重新体检") { store.runDoctor() }
                     .buttonStyle(PrimaryPillButtonStyle(compact: true))
             }

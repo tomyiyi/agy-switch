@@ -148,5 +148,42 @@ class TestAgySwitchEngine(unittest.TestCase):
                 self.assertIn("第二次交接", (ws / "HANDOFF_AUTO.md").read_text(encoding="utf-8"))
 
 
+    def test_unify_shared_assets_merges_skills_and_plugins_without_loss(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            multi = root / "multi"
+            state_dir = root / "state"
+
+            # 旧目录独有 skill + 主目录已有 skill
+            (home / ".gemini" / "antigravity" / "skills" / "hyperframes").mkdir(parents=True)
+            (home / ".gemini" / "config" / "skills" / "oil-ui").mkdir(parents=True)
+
+            # 隔离实例 3 独有官方插件 + config.json
+            inst3 = multi / "3-rew"
+            (inst3 / ".gemini" / "config" / "plugins" / "modern-web-guidance-plugin").mkdir(parents=True)
+            (inst3 / ".gemini" / "config" / "config.json").write_text(
+                json.dumps({"plugins": {"modern-web-guidance-plugin": {"enabled": True}}}),
+                encoding="utf-8",
+            )
+            # 隔离实例 6 空插件目录
+            inst6 = multi / "6-0705"
+            (inst6 / ".gemini" / "config").mkdir(parents=True)
+
+            with mock.patch.object(server, "HOME", home), \
+                 mock.patch.object(server, "MULTI_DIR", multi), \
+                 mock.patch.object(server, "STATE_DIR", state_dir):
+                res = server.unify_shared_assets()
+
+            self.assertEqual(res["instances_synced"], 2)
+            self.assertEqual(res["skills_count"], 2)
+            self.assertEqual(res["plugins_count"], 1)
+            self.assertTrue((inst6 / ".gemini" / "config" / "skills" / "hyperframes").exists())
+            self.assertTrue((inst6 / ".gemini" / "config" / "skills" / "oil-ui").exists())
+            self.assertTrue((inst6 / ".gemini" / "config" / "plugins" / "modern-web-guidance-plugin").exists())
+            cfg6 = json.loads((inst6 / ".gemini" / "config" / "config.json").read_text(encoding="utf-8"))
+            self.assertIn("modern-web-guidance-plugin", cfg6["plugins"])
+
+
 if __name__ == "__main__":
     unittest.main()
