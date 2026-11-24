@@ -1,7 +1,7 @@
 import Cocoa
 import SwiftUI
 
-let APP_VERSION = "5.3.0"
+let APP_VERSION = "5.4.0"
 
 struct AccountInfo: Decodable, Identifiable {
     let id: String
@@ -83,6 +83,8 @@ struct StatusPayload: Decodable {
     let handoff_history: [HandoffHistItem]?
     let last_switch: String?
     let switch_history: [SwitchRecord]?
+    let tb3_online: Bool?
+    let tb3_mount: String?
 }
 
 struct DoctorCheck: Decodable, Identifiable {

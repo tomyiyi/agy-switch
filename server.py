@@ -434,6 +434,33 @@ def list_accounts(state: dict):
     return accounts, recent_sessions, running_id, recommended_ids
 
 
+
+def detect_3tb_brain_dir() -> Optional[Path]:
+    """探测本地挂载的黑苹果 3TB 知识库中心仓 (SSOT)"""
+    for cand in [Path("/Volumes/100.124.49.41"), Path("/Volumes/3TB_DATA"), Path("/Volumes/E")]:
+        target = cand / "02-知识库" / "tom-brain-2026"
+        if target.exists():
+            return target
+    return None
+
+
+def sync_handoff_to_3tb(content: str, filename: str = "HANDOFF_AUTO.md") -> Optional[str]:
+    """安全镜像交接单至 3TB 母本，实现跨机器无缝上下文共享"""
+    brain = detect_3tb_brain_dir()
+    if not brain:
+        return None
+    try:
+        dest_dir = brain / "06-Codex对话" / "AGY_Handoff"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target = dest_dir / filename
+        target.write_text(content, encoding="utf-8")
+        latest = dest_dir / "HANDOFF_LATEST.md"
+        latest.write_text(content, encoding="utf-8")
+        return str(target)
+    except Exception:
+        return None
+
+
 def generate_handoff(workspace: str, transcript_path: str = "", max_turns: int = 12, extra_note: str = "") -> dict:
     """生成 HANDOFF_AUTO.md（附带 git status 摘要与用户特别交代），归档旧交接单并复制接力词到剪贴板"""
     ws = Path(workspace)
@@ -526,7 +553,10 @@ def generate_handoff(workspace: str, transcript_path: str = "", max_turns: int =
     except Exception:
         pass
 
-    return {"handoff_path": str(out_path), "turns": len(turns), "clipboard": RELAY_PROMPT}
+    # 3TB 中心仓远程同步 (SSOT)
+    tb_synced_path = sync_handoff_to_3tb("\n".join(lines), filename=f"HANDOFF_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+
+    return {"handoff_path": str(out_path), "turns": len(turns), "clipboard": RELAY_PROMPT, "tb3_path": tb_synced_path}
 
 
 def account_ag_dir(acc_id: str) -> Path:
@@ -1139,6 +1169,8 @@ def main():
                 "handoff_history": hist_items,
                 "last_switch": state.get("last_switch", ""),
                 "switch_history": (state.get("switch_history") or [])[:10],
+                "tb3_online": bool(detect_3tb_brain_dir()),
+                "tb3_mount": str(detect_3tb_brain_dir() or ""),
             }, ensure_ascii=False))
             return
 

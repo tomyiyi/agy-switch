@@ -778,6 +778,21 @@ struct QuickSwitchHUDView: View {
                 }
                 .buttonStyle(.plain)
 
+                // 3TB SSOT 在线感知徽章
+                let tbOnline = store.status?.tb3_online ?? false
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(tbOnline ? DS.brandGreen : Color.secondary.opacity(0.4))
+                        .frame(width: 6, height: 6)
+                    Text(tbOnline ? "3TB 在线" : "3TB 离线")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(tbOnline ? DS.brandGreen : .secondary)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.primary.opacity(0.04)))
+                .help(tbOnline ? "黑苹果 3TB 知识库中心仓已挂载，接力单将自动双向同步" : "3TB 未挂载，仅在本地保存接力单")
+
                 Spacer()
 
                 Button(action: {

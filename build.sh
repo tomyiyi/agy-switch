@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="AGY Switch.app"
-APP_VERSION="5.3.0"
+APP_VERSION="5.4.0"
 APP_BUNDLE="$ROOT_DIR/$APP_NAME"
 ICONSET="/tmp/AGYSwitch.iconset"
 ICON_PNG="$ROOT_DIR/macos/icon_1024.png"
