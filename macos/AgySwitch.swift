@@ -488,10 +488,54 @@ struct RealUsageMetric: View {
     }
 }
 
-// 3 列网格精致账号卡（零假百分比 + 真实登录态 + 家庭组备注）
+// 家庭组标签解析器（从备注 "[家庭组X-主/子] 说明" 提取结构化分组与角色）
+struct FamilyTagInfo {
+    let groupKey: String      // "家庭组 A" / "家庭组 B" / "家庭组 C" / "家庭组 D" / "未分组"
+    let shortBadge: String    // "A组" / "B组" / "C组" / "D组" / ""
+    let isManager: Bool
+    let cleanNote: String
+    let tint: Color
+
+    static func parse(_ note: String) -> FamilyTagInfo {
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("["), let closeIdx = trimmed.firstIndex(of: "]") {
+            let inside = String(trimmed[trimmed.index(after: trimmed.startIndex)..<closeIdx])
+            let rest = String(trimmed[trimmed.index(after: closeIdx)...]).trimmingCharacters(in: .whitespaces)
+            let isMgr = inside.contains("主")
+            for (letter, color) in [
+                ("D", Color(red: 0.06, green: 0.68, blue: 0.45)),
+                ("A", Color(red: 0.49, green: 0.36, blue: 0.90)),
+                ("B", DS.brandBlue),
+                ("C", DS.brandOrange),
+            ] {
+                if inside.contains("家庭组\(letter)") || inside.contains("家庭组 \(letter)") {
+                    return FamilyTagInfo(
+                        groupKey: "家庭组 \(letter)",
+                        shortBadge: "\(letter)组",
+                        isManager: isMgr,
+                        cleanNote: rest,
+                        tint: color
+                    )
+                }
+            }
+        }
+        return FamilyTagInfo(groupKey: "未分组", shortBadge: "", isManager: false, cleanNote: trimmed, tint: .secondary)
+    }
+
+    static let groupOrder: [String: Int] = [
+        "家庭组 D": 0,
+        "家庭组 A": 1,
+        "家庭组 B": 2,
+        "家庭组 C": 3,
+        "未分组": 99
+    ]
+}
+
+// 3 列网格精致账号卡（零假百分比 + 真实登录态 + 家庭组彩色胶囊 + 同组防误切提示）
 struct CockpitStyleAccountCard: View {
     let acc: AccountInfo
     let isBusy: Bool
+    var activeGroupKey: String? = nil
     let onSwitch: () -> Void
     var onLaunchIDE: (() -> Void)? = nil
     let onToggleCooldown: () -> Void
@@ -502,98 +546,184 @@ struct CockpitStyleAccountCard: View {
     @State private var isHovered: Bool = false
 
     var body: some View {
+        let fam = FamilyTagInfo.parse(acc.note)
+        let isSameGroupAsActive = !acc.running && fam.groupKey != "未分组" && fam.groupKey == activeGroupKey
         let badgeColor: Color = acc.running ? DS.brandBlue : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : DS.brandGreen))
         let badgeText: String = acc.running ? "当前" : (!acc.logged_in ? "待登录" : (acc.health == "cooldown" ? "冷却 \(acc.cooldown_remaining_min)m" : "已登录"))
         let sub5h = !acc.logged_in ? "需先登录" : (acc.reset_5h_min > 0 ? "\(acc.reset_5h_min / 60)h\(acc.reset_5h_min % 60)m 后重置" : "空闲满血")
         let sub7d = !acc.logged_in ? "无本地记录" : "活跃 \(acc.latest_active)"
 
-        VStack(alignment: .leading, spacing: 10) {
-            // 顶行：账号名 + 真实登录/运行状态胶囊
-            HStack(alignment: .center, spacing: 6) {
-                Circle().fill(badgeColor).frame(width: 7, height: 7)
-                Text(acc.label)
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-                Text(badgeText)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundColor(badgeColor)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(badgeColor.opacity(0.13)))
+        VStack(alignment: .leading, spacing: 0) {
+            // 主账号专属顶部 3px 主题色识别条
+            if fam.isManager {
+                LinearGradient(
+                    colors: [fam.tint, fam.tint.opacity(0.55)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(height: 3.5)
             }
 
-            // 家庭组/备注行
-            if let editNote = onEditNote {
-                Button(action: editNote) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "tag")
-                            .font(.system(size: 9.5))
-                        Text(acc.note.isEmpty ? "标家庭组 / 加备注" : acc.note)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
+            VStack(alignment: .leading, spacing: fam.isManager ? 11 : 9) {
+                // 顶行：主账号用大号皇冠徽章 + 15pt Bold，子账号用 7px 圆点 + 13pt Semibold
+                HStack(alignment: .center, spacing: 7) {
+                    if fam.isManager {
+                        ZStack {
+                            Circle()
+                                .fill(fam.tint.opacity(0.16))
+                                .frame(width: 22, height: 22)
+                            Image(systemName: "crown.fill")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundColor(fam.tint)
+                        }
+                    } else {
+                        Circle().fill(badgeColor).frame(width: 7, height: 7)
                     }
-                    .foregroundColor(acc.note.isEmpty ? .secondary.opacity(0.7) : DS.brandBlue)
+
+                    Text(acc.label)
+                        .font(.system(size: fam.isManager ? 15 : 13, weight: fam.isManager ? .bold : .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    if isSameGroupAsActive {
+                        Text("同组")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                            .help("与当前运行账号同属 \(fam.groupKey)，建议跨组切号")
+                    }
+                    Text(badgeText)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(badgeColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(badgeColor.opacity(0.13)))
                 }
-                .buttonStyle(.plain)
-            }
 
-            // 中部：双列 100% 真实本地轮数（不显示假百分比）
-            HStack(spacing: 8) {
-                RealUsageMetric(
-                    title: "近 5 小时",
-                    valueText: acc.logged_in ? "\(acc.turns_5h) 轮" : "—",
-                    subtext: sub5h,
-                    accent: !acc.logged_in ? .secondary : (acc.turns_5h == 0 ? DS.brandGreen : .primary)
-                )
-                RealUsageMetric(
-                    title: "近 7 天累计",
-                    valueText: acc.logged_in ? "\(acc.turns_7d) 轮" : "—",
-                    subtext: sub7d,
-                    accent: !acc.logged_in ? .secondary : DS.brandBlue
-                )
-            }
+                // 家庭组胶囊：主号用实心高亮胶囊，子号用轻量描边胶囊
+                if let editNote = onEditNote {
+                    Button(action: editNote) {
+                        HStack(spacing: 6) {
+                            if !fam.shortBadge.isEmpty {
+                                if fam.isManager {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "star.fill")
+                                            .font(.system(size: 8))
+                                        Text("\(fam.shortBadge) · 主账号")
+                                            .font(.system(size: 10.5, weight: .bold))
+                                    }
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2.5)
+                                    .background(Capsule().fill(fam.tint))
+                                } else {
+                                    Text("\(fam.shortBadge) · 成员")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundColor(fam.tint.opacity(0.9))
+                                        .padding(.horizontal, 6.5)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            Capsule()
+                                                .fill(fam.tint.opacity(0.08))
+                                                .overlay(Capsule().stroke(fam.tint.opacity(0.25), lineWidth: 0.7))
+                                        )
+                                }
 
-            // 底行：轻量图标栏 + 精致切换胶囊
-            HStack(spacing: 8) {
-                if acc.logged_in {
-                    Button(action: onToggleCooldown) {
-                        Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake")
-                            .font(.system(size: 12))
-                            .foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary)
+                                if !fam.cleanNote.isEmpty {
+                                    Text(fam.cleanNote)
+                                        .font(.system(size: 10.5))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                            } else {
+                                Image(systemName: "tag")
+                                    .font(.system(size: 9.5))
+                                    .foregroundColor(.secondary.opacity(0.7))
+                                Text(fam.cleanNote.isEmpty ? "标家庭组 / 加备注" : fam.cleanNote)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(fam.cleanNote.isEmpty ? .secondary.opacity(0.7) : .secondary)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
-                    .help(acc.health == "cooldown" ? "恢复可用" : "标记冷却 5 小时")
                 }
 
-                if acc.id != "main", let del = onDelete {
-                    Button(action: del) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 11.5))
-                            .foregroundColor(.secondary.opacity(0.8))
+                // 中部：双列 100% 真实本地轮数（不显示假百分比）
+                HStack(spacing: 8) {
+                    RealUsageMetric(
+                        title: "近 5 小时",
+                        valueText: acc.logged_in ? "\(acc.turns_5h) 轮" : "—",
+                        subtext: sub5h,
+                        accent: !acc.logged_in ? .secondary : (acc.turns_5h == 0 ? DS.brandGreen : .primary)
+                    )
+                    RealUsageMetric(
+                        title: "近 7 天累计",
+                        valueText: acc.logged_in ? "\(acc.turns_7d) 轮" : "—",
+                        subtext: sub7d,
+                        accent: !acc.logged_in ? .secondary : DS.brandBlue
+                    )
+                }
+
+                // 底行：轻量图标栏 + 精致切换胶囊
+                HStack(spacing: 8) {
+                    if acc.logged_in {
+                        Button(action: onToggleCooldown) {
+                            Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake")
+                                .font(.system(size: 12))
+                                .foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(acc.health == "cooldown" ? "恢复可用" : "标记冷却 5 小时")
                     }
-                    .buttonStyle(.plain)
-                    .help("删除隔离账号（移入废纸篓）")
-                }
 
-                Spacer()
+                    if acc.id != "main", let del = onDelete {
+                        Button(action: del) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary.opacity(0.8))
+                        }
+                        .buttonStyle(.plain)
+                        .help("删除隔离账号（移入废纸篓）")
+                    }
 
-                Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) {
-                    onSwitch()
+                    Spacer()
+
+                    Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) {
+                        onSwitch()
+                    }
+                    .buttonStyle(PrimaryPillButtonStyle(compact: true))
+                    .disabled(acc.running || !acc.app_exists || isBusy)
                 }
-                .buttonStyle(PrimaryPillButtonStyle(compact: true))
-                .disabled(acc.running || !acc.app_exists || isBusy)
             }
+            .padding(fam.isManager ? 14 : 12)
         }
-        .padding(13)
+        .clipShape(RoundedRectangle(cornerRadius: 13))
         .background(
             RoundedRectangle(cornerRadius: 13)
                 .fill(DS.cardBg)
-                .shadow(color: Color.black.opacity(isHovered ? 0.08 : 0.04), radius: isHovered ? 10 : 6, y: 2)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13)
+                        .fill(
+                            LinearGradient(
+                                colors: [fam.isManager ? fam.tint.opacity(0.07) : Color.clear, Color.clear],
+                                startPoint: .top,
+                                endPoint: .center
+                            )
+                        )
+                )
+                .shadow(color: Color.black.opacity(isHovered ? 0.09 : (fam.isManager ? 0.06 : 0.035)), radius: isHovered ? 10 : (fam.isManager ? 8 : 5), y: 2)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 13)
-                .stroke(acc.running ? DS.brandBlue.opacity(0.65) : (isHovered ? DS.brandBlue.opacity(0.3) : DS.border), lineWidth: acc.running ? 1.5 : 1)
+                .stroke(
+                    acc.running ? DS.brandBlue.opacity(0.75) : (fam.isManager ? fam.tint.opacity(isHovered ? 0.65 : 0.42) : (isHovered ? DS.brandBlue.opacity(0.3) : DS.border)),
+                    lineWidth: (acc.running || fam.isManager) ? 1.5 : 1
+                )
         )
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.15), value: isHovered)
@@ -817,32 +947,42 @@ struct DashboardView: View {
     }
 }
 
-// 紧凑小卡片（高密度模式，一屏看 12+ 个号）
+// 紧凑小卡片（高密度模式，真实轮数 + 家庭组标签）
 struct CompactMiniAccountCard: View {
     let acc: AccountInfo
     let isBusy: Bool
     let onSwitch: () -> Void
 
     var body: some View {
+        let fam = FamilyTagInfo.parse(acc.note)
         let dotColor: Color = acc.running ? DS.brandBlue : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : DS.brandGreen))
-        let c5: Color = acc.remain_5h_pct <= 15 ? DS.brandRed : (acc.remain_5h_pct <= 35 ? DS.brandOrange : DS.brandGreen)
-        let c7: Color = acc.remain_7d_pct <= 15 ? DS.brandRed : (acc.remain_7d_pct <= 35 ? DS.brandOrange : DS.brandBlue)
 
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 5) {
                 Circle().fill(dotColor).frame(width: 6.5, height: 6.5)
                 Text(acc.label).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                 Spacer()
-                if acc.running {
-                    Text("当前").font(.system(size: 9.5, weight: .bold)).foregroundColor(DS.brandBlue)
+                if !fam.shortBadge.isEmpty {
+                    Text(fam.isManager ? "\(fam.shortBadge)·主" : fam.shortBadge)
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundColor(fam.tint)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(fam.tint.opacity(0.13)))
                 }
             }
-            HStack(spacing: 8) {
-                Text("5h \(acc.remain_5h_pct)%").font(.system(size: 11, weight: .bold).monospacedDigit()).foregroundColor(c5)
-                Text("·").foregroundColor(.secondary)
-                Text("周 \(acc.remain_7d_pct)%").font(.system(size: 11, weight: .bold).monospacedDigit()).foregroundColor(c7)
+            HStack(spacing: 6) {
+                Text(acc.logged_in ? "5h \(acc.turns_5h)轮" : "待登录")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundColor(acc.logged_in ? (acc.turns_5h == 0 ? DS.brandGreen : .primary) : DS.brandOrange)
+                if acc.logged_in {
+                    Text("·").foregroundColor(.secondary)
+                    Text("7d \(acc.turns_7d)轮")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
-                Button(acc.running ? "使用中" : "切换") { onSwitch() }
+                Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) { onSwitch() }
                     .buttonStyle(PrimaryPillButtonStyle(compact: true))
                     .disabled(acc.running || !acc.app_exists || isBusy)
             }
@@ -853,7 +993,7 @@ struct CompactMiniAccountCard: View {
     }
 }
 
-// 横向列表行（表格模式）
+// 横向列表行（表格模式，真实轮数 + 家庭组标签）
 struct AccountListRow: View {
     let acc: AccountInfo
     let isBusy: Bool
@@ -863,28 +1003,57 @@ struct AccountListRow: View {
     let onDelete: () -> Void
 
     var body: some View {
+        let fam = FamilyTagInfo.parse(acc.note)
         let dotColor: Color = acc.running ? DS.brandBlue : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : DS.brandGreen))
 
         HStack(spacing: 14) {
             HStack(spacing: 8) {
                 Circle().fill(dotColor).frame(width: 8, height: 8)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(acc.label).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(acc.note.isEmpty ? acc.latest_active : acc.note).font(.system(size: 10.5)).foregroundColor(.secondary).lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(acc.label).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                        if !fam.shortBadge.isEmpty {
+                            Text("\(fam.shortBadge)·\(fam.isManager ? "主号" : "成员")")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundColor(fam.tint)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(Capsule().fill(fam.tint.opacity(0.13)))
+                        }
+                    }
+                    Text(fam.cleanNote.isEmpty ? "活跃 \(acc.latest_active)" : fam.cleanNote)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
             }
-            .frame(width: 190, alignment: .leading)
+            .frame(width: 240, alignment: .leading)
 
-            CompactQuotaMetric(title: "5h 窗口", pct: acc.remain_5h_pct, subtext: "\(acc.turns_5h) 轮", defaultAccent: DS.brandGreen)
-            CompactQuotaMetric(title: "周额度", pct: acc.remain_7d_pct, subtext: "近7天 \(acc.turns_7d) 轮", defaultAccent: DS.brandBlue)
+            RealUsageMetric(
+                title: "近 5 小时",
+                valueText: acc.logged_in ? "\(acc.turns_5h) 轮" : "—",
+                subtext: acc.logged_in ? (acc.turns_5h == 0 ? "空闲满血" : "活跃中") : "待登录",
+                accent: !acc.logged_in ? .secondary : (acc.turns_5h == 0 ? DS.brandGreen : .primary)
+            )
+            RealUsageMetric(
+                title: "近 7 天累计",
+                valueText: acc.logged_in ? "\(acc.turns_7d) 轮" : "—",
+                subtext: acc.logged_in ? "活跃 \(acc.latest_active)" : "无本地记录",
+                accent: !acc.logged_in ? .secondary : DS.brandBlue
+            )
 
             HStack(spacing: 10) {
-                Button(action: onCalibrate) { Image(systemName: "slider.horizontal.3").foregroundColor(.secondary) }.buttonStyle(.plain)
-                Button(action: onToggleCooldown) { Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake").foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary) }.buttonStyle(.plain)
+                if acc.logged_in {
+                    Button(action: onToggleCooldown) {
+                        Image(systemName: acc.health == "cooldown" ? "bolt.heart" : "snowflake")
+                            .foregroundColor(acc.health == "cooldown" ? DS.brandGreen : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
                 if acc.id != "main" {
                     Button(action: onDelete) { Image(systemName: "trash").foregroundColor(.secondary) }.buttonStyle(.plain)
                 }
-                Button(acc.running ? "使用中" : "切换") { onSwitch() }
+                Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) { onSwitch() }
                     .buttonStyle(PrimaryPillButtonStyle(compact: true))
                     .disabled(acc.running || !acc.app_exists || isBusy)
             }
@@ -896,11 +1065,12 @@ struct AccountListRow: View {
     }
 }
 
-// MARK: - 2. 账号池页（支持网格/紧凑/列表 3 种排列 + 增删改备注 + 校准）
+// MARK: - 2. 账号池页（按家庭组智能分组 + 网格/紧凑/列表 3 视图 + 增删改备注）
 struct AccountsView: View {
     @ObservedObject var store: SwitchStore
     @State private var filter: String = "all"
     @State private var layoutMode: String = UserDefaults.standard.string(forKey: "agy_layout") ?? "grid"
+    @State private var groupByFamily: Bool = UserDefaults.standard.object(forKey: "agy_group_family") == nil ? true : UserDefaults.standard.bool(forKey: "agy_group_family")
     @State private var searchText: String = ""
     @State private var showAddSheet: Bool = false
     @State private var newAccId: String = ""
@@ -914,20 +1084,123 @@ struct AccountsView: View {
     @State private var calAcc7d: Double = 100
     @State private var deletingAcc: AccountInfo? = nil
 
+    private func buildSections(_ list: [AccountInfo]) -> [(key: String, tint: Color, items: [AccountInfo])] {
+        var bucket: [String: (tint: Color, items: [AccountInfo])] = [:]
+        for acc in list {
+            let fam = FamilyTagInfo.parse(acc.note)
+            var entry = bucket[fam.groupKey] ?? (tint: fam.tint, items: [])
+            entry.items.append(acc)
+            bucket[fam.groupKey] = entry
+        }
+        return bucket.map { (k, v) in
+            // 组内排序：主号排第 1，其次已登录，最后按名称
+            let sortedItems = v.items.sorted { a, b in
+                let fa = FamilyTagInfo.parse(a.note)
+                let fb = FamilyTagInfo.parse(b.note)
+                if fa.isManager != fb.isManager { return fa.isManager }
+                if a.logged_in != b.logged_in { return a.logged_in }
+                return a.label < b.label
+            }
+            return (key: k, tint: v.tint, items: sortedItems)
+        }.sorted { a, b in
+            (FamilyTagInfo.groupOrder[a.key] ?? 50) < (FamilyTagInfo.groupOrder[b.key] ?? 50)
+        }
+    }
+
+    @ViewBuilder
+    private func renderAccounts(_ items: [AccountInfo], activeGroupKey: String?) -> some View {
+        if layoutMode == "list" {
+            LazyVStack(spacing: 8) {
+                ForEach(items) { acc in
+                    AccountListRow(
+                        acc: acc,
+                        isBusy: store.isBusy,
+                        onSwitch: { store.switchTo(acc.id) },
+                        onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
+                        onCalibrate: {
+                            calibratingAcc = acc
+                            calAcc5h = Double(acc.remain_5h_pct)
+                            calAcc7d = Double(acc.remain_7d_pct)
+                        },
+                        onDelete: { deletingAcc = acc }
+                    )
+                }
+            }
+        } else if layoutMode == "compact" {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 185, maximum: 240), spacing: 10)], spacing: 10) {
+                ForEach(items) { acc in
+                    CompactMiniAccountCard(
+                        acc: acc,
+                        isBusy: store.isBusy,
+                        onSwitch: { store.switchTo(acc.id) }
+                    )
+                }
+            }
+        } else {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 255, maximum: 350), spacing: 12)], spacing: 12) {
+                ForEach(items) { acc in
+                    CockpitStyleAccountCard(
+                        acc: acc,
+                        isBusy: store.isBusy,
+                        activeGroupKey: activeGroupKey,
+                        onSwitch: { store.switchTo(acc.id) },
+                        onLaunchIDE: { store.launchIDE(acc.id) },
+                        onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
+                        onEditNote: {
+                            editingNoteAcc = acc
+                            editingNoteText = acc.note
+                        },
+                        onCalibrate: {
+                            calibratingAcc = acc
+                            calAcc5h = Double(acc.remain_5h_pct)
+                            calAcc7d = Double(acc.remain_7d_pct)
+                        },
+                        onDelete: { deletingAcc = acc }
+                    )
+                }
+            }
+        }
+    }
+
     var body: some View {
         let all = store.status?.accounts ?? []
+        let activeAcc = all.first(where: { $0.running })
+        let activeGroupKey = activeAcc.map { FamilyTagInfo.parse($0.note).groupKey }
         let filtered = all.filter { acc in
             let matchFilter = (filter == "all") || (filter == "ready" && acc.health == "ready") || (filter == "cooldown" && acc.health == "cooldown")
             let q = searchText.trimmingCharacters(in: .whitespaces)
             let matchSearch = q.isEmpty || acc.label.localizedCaseInsensitiveContains(q) || acc.note.localizedCaseInsensitiveContains(q)
             return matchFilter && matchSearch
         }
+        let sections = buildSections(filtered)
 
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                TextField("搜索账号名或备注...", text: $searchText)
+                TextField("搜索账号名或家庭组...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 190)
+                    .frame(width: 175)
+
+                Button(action: {
+                    groupByFamily.toggle()
+                    UserDefaults.standard.set(groupByFamily, forKey: "agy_group_family")
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: groupByFamily ? "rectangle.3.group.fill" : "square.grid.2x2")
+                            .font(.system(size: 11))
+                        Text(groupByFamily ? "按家庭组" : "平铺")
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .foregroundColor(groupByFamily ? DS.brandBlue : .primary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5.5)
+                    .background(
+                        Capsule()
+                            .fill(groupByFamily ? DS.brandBlue.opacity(0.12) : DS.cardBg)
+                            .overlay(Capsule().stroke(groupByFamily ? DS.brandBlue.opacity(0.35) : DS.border, lineWidth: 1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("切换按家庭组分组展示或平铺展示")
 
                 Picker("", selection: $layoutMode) {
                     Image(systemName: "square.grid.2x2").tag("grid")
@@ -935,7 +1208,7 @@ struct AccountsView: View {
                     Image(systemName: "list.bullet").tag("list")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 108)
+                .frame(width: 104)
                 .onChange(of: layoutMode) { _, newVal in
                     UserDefaults.standard.set(newVal, forKey: "agy_layout")
                 }
@@ -947,7 +1220,7 @@ struct AccountsView: View {
                     Text("冷却 (\(all.filter { $0.health == "cooldown" }.count))").tag("cooldown")
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 245)
+                .frame(width: 230)
 
                 Spacer()
 
@@ -975,61 +1248,43 @@ struct AccountsView: View {
             .padding(.top, 16)
 
             ScrollView {
-                if layoutMode == "list" {
-                    LazyVStack(spacing: 8) {
-                        ForEach(filtered) { acc in
-                            AccountListRow(
-                                acc: acc,
-                                isBusy: store.isBusy,
-                                onSwitch: { store.switchTo(acc.id) },
-                                onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
-                                onCalibrate: {
-                                    calibratingAcc = acc
-                                    calAcc5h = Double(acc.remain_5h_pct)
-                                    calAcc7d = Double(acc.remain_7d_pct)
-                                },
-                                onDelete: { deletingAcc = acc }
-                            )
+                if groupByFamily {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(sections, id: \.key) { sec in
+                            let loggedCount = sec.items.filter { $0.logged_in }.count
+                            let isCurrentGroup = sec.key != "未分组" && sec.key == activeGroupKey
+                            let subtitle = sec.key == "家庭组 D" ? "独享 AI Pro · 切号首选" : (isCurrentGroup ? "当前运行所在组 · 切号建议避开" : "已登录 \(loggedCount)/\(sec.items.count)")
+
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 8) {
+                                    RoundedRectangle(cornerRadius: 2.5)
+                                        .fill(sec.tint)
+                                        .frame(width: 4, height: 15)
+                                    Text(sec.key)
+                                        .font(.system(size: 13.5, weight: .bold))
+                                    Text("\(sec.items.count) 个账号")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.primary.opacity(0.05)))
+                                    Text(subtitle)
+                                        .font(.system(size: 11, weight: isCurrentGroup || sec.key == "家庭组 D" ? .semibold : .regular))
+                                        .foregroundColor(sec.key == "家庭组 D" ? sec.tint : (isCurrentGroup ? DS.brandOrange : .secondary))
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 2)
+
+                                renderAccounts(sec.items, activeGroupKey: activeGroupKey)
+                            }
                         }
                     }
                     .padding(.horizontal, 20)
-                    .padding(.bottom, 20)
-                } else if layoutMode == "compact" {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 185, maximum: 240), spacing: 10)], spacing: 10) {
-                        ForEach(filtered) { acc in
-                            CompactMiniAccountCard(
-                                acc: acc,
-                                isBusy: store.isBusy,
-                                onSwitch: { store.switchTo(acc.id) }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 20)
+                    .padding(.bottom, 24)
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 250, maximum: 340), spacing: 12)], spacing: 12) {
-                        ForEach(filtered) { acc in
-                            CockpitStyleAccountCard(
-                                acc: acc,
-                                isBusy: store.isBusy,
-                                onSwitch: { store.switchTo(acc.id) },
-                                onLaunchIDE: { store.launchIDE(acc.id) },
-                                onToggleCooldown: { store.setCooldown(acc.id, hours: acc.health == "cooldown" ? 0 : 5) },
-                                onEditNote: {
-                                    editingNoteAcc = acc
-                                    editingNoteText = acc.note
-                                },
-                                onCalibrate: {
-                                    calibratingAcc = acc
-                                    calAcc5h = Double(acc.remain_5h_pct)
-                                    calAcc7d = Double(acc.remain_7d_pct)
-                                },
-                                onDelete: { deletingAcc = acc }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 20)
+                    renderAccounts(filtered, activeGroupKey: activeGroupKey)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 24)
                 }
             }
         }
@@ -1467,7 +1722,7 @@ struct MainRootView: View {
                             .font(.caption.bold())
                             .lineLimit(1)
                         Spacer()
-                        Text("v4.0")
+                        Text("v4.1")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                     }
