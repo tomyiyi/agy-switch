@@ -531,3 +531,206 @@ struct AccountListRow: View {
         )
     }
 }
+
+// MARK: - 极简 HUD 悬浮切号面板 (Cockpit HUD)
+
+struct QuickSwitchHUDView: View {
+    @ObservedObject var store: SwitchStore
+    var onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // 顶栏：当前账号状态与关闭提示
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(store.status?.running_id.isEmpty == false ? DS.brandGreen : Color.gray)
+                    .frame(width: 8, height: 8)
+                let activeId = store.status?.running_id ?? ""
+                let activeAcc = store.status?.accounts.first(where: { $0.running })
+                let activeTag = activeAcc.map { a -> String in
+                    let g = a.groupLetter
+                    return g.isEmpty ? a.label : "\(a.label) (\(g)组\(a.isGroupManager ? "·主" : ""))"
+                } ?? (activeId.isEmpty ? "无运行实例" : activeId)
+
+                Text("当前：\(activeTag)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+
+                Spacer()
+
+                Text("按 Esc 退出")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.06)))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color.primary.opacity(0.03))
+
+            Divider()
+
+            VStack(spacing: 12) {
+                // 黄金接力主按钮（默认聚焦首选）
+                if let top = store.topRecommendedAccount {
+                    let topFam = FamilyVisual.from(top)
+                    Button(action: {
+                        onDismiss()
+                        store.switchTo("")
+                    }) {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(LinearGradient(colors: [DS.brandBlue, Color.indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                    .frame(width: 36, height: 36)
+                                Image(systemName: "bolt.fill")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(.white)
+                            }
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text("⚡ 一键接力")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundColor(DS.brandBlue)
+                                    Text(top.label)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.primary)
+                                    if topFam.isManager {
+                                        Image(systemName: "crown.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.orange)
+                                    }
+                                }
+
+                                Text(top.recommendTag.isEmpty ? "跨组满血候选" : top.recommendTag)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Text("↩ Return")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(DS.brandBlue))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(DS.brandBlue.opacity(0.08)))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(DS.brandBlue.opacity(0.35), lineWidth: 1.2)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.defaultAction)
+                }
+
+                // 候选列表 (前 4 个)
+                let candidates = Array(store.recommendedAccounts.prefix(4))
+                if !candidates.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("指定快捷切换：")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 2)
+
+                        ForEach(Array(candidates.enumerated()), id: \.element.id) { index, acc in
+                            let fam = FamilyVisual.from(acc)
+                            Button(action: {
+                                onDismiss()
+                                store.switchTo(acc.id)
+                            }) {
+                                HStack(spacing: 8) {
+                                    Text("\(index + 1)")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 16, height: 16)
+                                        .background(Circle().fill(Color.primary.opacity(0.08)))
+
+                                    Circle()
+                                        .fill(fam.tint)
+                                        .frame(width: 7, height: 7)
+
+                                    Text(acc.label)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.primary)
+
+                                    if fam.isManager {
+                                        Text("主")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(fam.tint)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Capsule().fill(fam.tint.opacity(0.14)))
+                                    }
+
+                                    Spacer()
+
+                                    Text("5h: \(acc.turns_5h)轮")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary.opacity(0.5))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.03)))
+                            }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut(KeyEquivalent(Character(UnicodeScalar(49 + index)!)), modifiers: [])
+                        }
+                    }
+                }
+            }
+            .padding(14)
+
+            Divider()
+
+            // 底部操作区
+            HStack(spacing: 12) {
+                Button(action: {
+                    onDismiss()
+                    store.saveHandoff(transcript: "", note: "")
+                }) {
+                    Label("生成断点交接词", systemImage: "doc.on.clipboard")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button(action: {
+                    onDismiss()
+                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp.windows.first(where: { !($0 is HUDWindow) })?.makeKeyAndOrderFront(nil)
+                }) {
+                    Text("打开主控制台 ↗")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.brandBlue)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Color.primary.opacity(0.02))
+        }
+        .frame(width: 440)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.28), radius: 24, x: 0, y: 10)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}

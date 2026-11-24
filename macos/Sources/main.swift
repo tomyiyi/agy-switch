@@ -1,6 +1,75 @@
 import Cocoa
 import SwiftUI
+import Carbon
 
+// MARK: - 全局原生快捷键管理器 (Carbon RegisterEventHotKey)
+final class GlobalHotKeyManager {
+    static let shared = GlobalHotKeyManager()
+    private var hotKeyRef: EventHotKeyRef?
+    var onTrigger: (() -> Void)?
+
+    private init() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            { (nextHandler, theEvent, userData) -> OSStatus in
+                DispatchQueue.main.async {
+                    GlobalHotKeyManager.shared.onTrigger?()
+                }
+                return noErr
+            },
+            1,
+            &eventType,
+            nil,
+            nil
+        )
+    }
+
+    /// 注册快捷键 (默认 ⌃⌥A: keyCode 0, controlKey | optionKey)
+    func register(keyCode: UInt32 = 0, modifiers: UInt32 = UInt32(controlKey | optionKey)) {
+        if let ref = hotKeyRef {
+            UnregisterEventHotKey(ref)
+            hotKeyRef = nil
+        }
+        let hotKeyID = EventHotKeyID(signature: OSType(0x41475953), id: 1) // 'AGYS'
+        RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+    }
+}
+
+// MARK: - HUD 悬浮窗口
+final class HUDWindow: NSPanel {
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        self.isOpaque = false
+        self.backgroundColor = .clear
+        self.hasShadow = true
+        self.level = .floating
+        self.isMovableByWindowBackground = true
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+
+    override var canBecomeKey: Bool {
+        return true
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        self.orderOut(sender)
+    }
+}
+
+// MARK: - 主窗口根视图
 struct MainRootView: View {
     @ObservedObject var store: SwitchStore
     @State private var tab: SidebarTab = .dashboard
@@ -63,8 +132,10 @@ struct MainRootView: View {
     }
 }
 
+// MARK: - App 委托与菜单事件
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var window: NSWindow!
+    private var hudWindow: HUDWindow?
     private var statusItem: NSStatusItem!
     private let statusMenu = NSMenu()
     private let store = SwitchStore()
@@ -72,11 +143,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeManager.applySavedTheme()
 
+        // 1. 初始化顶部状态栏图标
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "⚡"
         statusMenu.delegate = self
         statusItem.menu = statusMenu
 
+        // 2. 初始化主窗口
         let rootView = MainRootView(store: store)
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 670),
@@ -90,9 +163,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        // 3. 初始化极简 HUD 切号面板
+        setupHUDWindow()
+
+        // 4. 注册全局快捷键 ⌃⌥A (Control + Option + A)
+        GlobalHotKeyManager.shared.onTrigger = { [weak self] in
+            self?.toggleHUD()
+        }
+        GlobalHotKeyManager.shared.register(keyCode: 0, modifiers: UInt32(controlKey | optionKey))
     }
 
-    // 每次点开顶部 ⚡ 菜单时动态构建最新账号池快照，避免过期缓存
+    private func setupHUDWindow() {
+        let hudView = QuickSwitchHUDView(store: store, onDismiss: { [weak self] in
+            self?.hudWindow?.orderOut(nil)
+        })
+        let panel = HUDWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 320))
+        panel.contentView = NSHostingView(rootView: hudView)
+        self.hudWindow = panel
+    }
+
+    @objc private func toggleHUD() {
+        guard let panel = hudWindow else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            store.refresh(showFeedback: false)
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    // 每次点开顶部 ⚡ 菜单时动态构建最新账号池快照
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
 
@@ -121,6 +224,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             emptyItem.isEnabled = false
             menu.addItem(emptyItem)
         }
+
+        let hudItem = NSMenuItem(title: "呼出极简切号浮窗 (⌃⌥A)", action: #selector(toggleHUD), keyEquivalent: "")
+        hudItem.target = self
+        menu.addItem(hudItem)
 
         menu.addItem(NSMenuItem.separator())
 
