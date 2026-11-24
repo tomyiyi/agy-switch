@@ -828,6 +828,13 @@ def perform_switch(target_app: str, target_label: str, source_id: str = "", targ
     subprocess.Popen(["/usr/bin/open", "-n", target_app])
     notify_macos(f"已切换到 {target_label}，接力词已复制，Cmd+V 即可继续")
 
+    # 自动粘贴辅助（若用户启用）：延迟 2.2 秒等待窗口渲染并聚焦后自动模拟 Cmd+V
+    try:
+        auto_paste_script = 'delay 2.2\ntell application "System Events"\n    keystroke "v" using {command down}\nend tell'
+        subprocess.Popen(["/usr/bin/osascript", "-e", auto_paste_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 
 def add_account(acc_id: str, note: str, state: dict) -> dict:
     """新建隔离账号实例 + 公共环境软链 + 桌面 .app 启动器"""

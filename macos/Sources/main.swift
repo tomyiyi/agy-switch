@@ -143,11 +143,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeManager.applySavedTheme()
 
-        // 1. 初始化顶部状态栏图标
+        // 1. 初始化顶部状态栏图标与动态指示器
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "⚡"
         statusMenu.delegate = self
         statusItem.menu = statusMenu
+
+        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.updateStatusIndicator()
+        }
+        updateStatusIndicator()
 
         // 2. 初始化主窗口
         let rootView = MainRootView(store: store)
@@ -196,6 +201,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // 每次点开顶部 ⚡ 菜单时动态构建最新账号池快照
+    private func updateStatusIndicator() {
+        guard let button = statusItem.button else { return }
+        let runningId = store.status?.running_id ?? ""
+        guard !runningId.isEmpty, let activeAcc = store.status?.accounts.first(where: { a in a.running }) else {
+            button.title = "⚡"
+            return
+        }
+
+        let pct = activeAcc.remain_5h_pct
+        let icon: String
+        if pct >= 60 {
+            icon = "🟢"
+        } else if pct >= 20 {
+            icon = "🟡"
+        } else {
+            icon = "🔴"
+        }
+
+        let grp = activeAcc.groupLetter
+        let tag = grp.isEmpty ? "" : " · \(grp)组"
+        button.title = "\(icon) ⚡ \(pct)%\(tag)"
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
 
