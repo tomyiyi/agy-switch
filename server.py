@@ -18,8 +18,9 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List, Dict, Any
 
-APP_VERSION = "5.1.0"
+APP_VERSION = "5.4.0"
 
 _raw_home = str(Path.home())
 HOME = (
