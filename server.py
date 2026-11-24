@@ -1,134 +1,165 @@
 #!/usr/bin/env python3
 """
-agy-switch: Antigravity 多账号池监控与一键接力控制台（借鉴 cc-switch 设计）
-零第三方依赖，Python 3 标准库直接运行。
+AGY Switch v5.0 — Antigravity 原生多账号池管理与跨家庭组智能接力引擎
+零第三方依赖，仅使用 Python 3 标准库，严格遵守本地只读安全边界（绝不触碰私有 OAuth Token API）。
 """
 
 import argparse
+import contextlib
+import fcntl
 import glob
 import json
 import os
 import re
+import signal
 import shutil
 import sqlite3
 import subprocess
-import threading
 import time
-from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+
+APP_VERSION = "5.0.0"
 
 _raw_home = str(Path.home())
-HOME = Path(_raw_home.split("/.antigravity_multi_instances/")[0]) if "/.antigravity_multi_instances/" in _raw_home else Path(_raw_home)
+HOME = (
+    Path(_raw_home.split("/.antigravity_multi_instances/")[0])
+    if "/.antigravity_multi_instances/" in _raw_home
+    else Path(_raw_home)
+)
 MULTI_DIR = HOME / ".antigravity_multi_instances"
 APP_DIR = HOME / "Desktop" / "Antigravity多开管理"
 STATE_DIR = HOME / ".agy-switch"
 STATE_FILE = STATE_DIR / "state.json"
+LOCK_FILE = STATE_DIR / "state.lock"
 DEFAULT_WORKSPACE = str(HOME / "Desktop" / "workspace")
 RELAY_PROMPT = "请先阅读 HANDOFF_AUTO.md，接力继续刚才未完成的工作。"
 WARN_5H_LIMIT = 200
 WARN_7D_LIMIT = 1000
 
+VALID_ACC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,47}$")
+FAMILY_RE = re.compile(r"^\[家庭组\s*([A-Fa-f])\s*(?:[-·]\s*(主|子|管理员|成员))?\]\s*(.*)$")
+FLAG_KEYWORDS = ("⚠️", "二次验证", "风控", "禁用", "封号")
+
+
+def validate_isolated_acc_id(acc_id: str) -> str:
+    """严格白名单校验隔离账号标识，彻底拦截 '.' / '..' / 路径穿越"""
+    cleaned = (acc_id or "").strip()
+    if not cleaned or cleaned == "main" or not VALID_ACC_ID_RE.match(cleaned):
+        raise ValueError("账号标识仅支持 2-48 位字母、数字、点、横线或下划线（首字符须为字母或数字），且不能为 main")
+    candidate = (MULTI_DIR / cleaned).resolve()
+    if candidate.parent != MULTI_DIR.resolve():
+        raise ValueError("非法的账号目录路径")
+    return cleaned
+
+
+@contextlib.contextmanager
+def state_lock(shared: bool = False):
+    """跨进程文件锁（读操作用 LOCK_SH，写临界区用 LOCK_EX，严禁包裹耗时外部调用）"""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOCK_FILE, "a+", encoding="utf-8") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
 
 def load_state() -> dict:
+    """加载并严格做类型与防 null 归一化，兼容旧版或手工编辑的 state.json"""
     base = {
         "cooldowns": {},
         "notes": {},
         "calibrations": {},
         "workspace": DEFAULT_WORKSPACE,
+        "workspaces": [DEFAULT_WORKSPACE],
         "warn_5h_limit": WARN_5H_LIMIT,
         "warn_7d_limit": WARN_7D_LIMIT,
+        "last_switch": "",
+        "switch_history": [],
     }
     if STATE_FILE.exists():
         try:
             loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            base.update(loaded)
+            if isinstance(loaded, dict):
+                if isinstance(loaded.get("cooldowns"), dict):
+                    base["cooldowns"] = loaded["cooldowns"]
+                if isinstance(loaded.get("notes"), dict):
+                    base["notes"] = loaded["notes"]
+                if isinstance(loaded.get("calibrations"), dict):
+                    base["calibrations"] = loaded["calibrations"]
+                if isinstance(loaded.get("workspace"), str) and loaded["workspace"].strip():
+                    base["workspace"] = loaded["workspace"].strip()
+                if isinstance(loaded.get("workspaces"), list):
+                    ws_clean = [w for w in loaded["workspaces"] if isinstance(w, str) and w.strip()]
+                    if ws_clean:
+                        base["workspaces"] = ws_clean
+                if loaded.get("warn_5h_limit") is not None:
+                    base["warn_5h_limit"] = int(loaded["warn_5h_limit"])
+                if loaded.get("warn_7d_limit") is not None:
+                    base["warn_7d_limit"] = int(loaded["warn_7d_limit"])
+                if isinstance(loaded.get("last_switch"), str):
+                    base["last_switch"] = loaded["last_switch"]
+                if isinstance(loaded.get("switch_history"), list):
+                    base["switch_history"] = [x for x in loaded["switch_history"] if isinstance(x, dict)]
         except Exception:
             pass
     return base
 
 
 def save_state(state: dict) -> None:
+    """使用临时文件 + os.replace 原子落盘，避免写入中断损坏 JSON"""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = STATE_DIR / f"state.json.{os.getpid()}.tmp"
+    payload = json.dumps(state, ensure_ascii=False, indent=2)
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
+
+
+def notify_macos(message: str, title: str = "AGY Switch") -> None:
+    """安全转义 AppleScript 字符串并发送 macOS 系统通知"""
+    safe_msg = message.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
+    safe_title = title.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-e", f'display notification "{safe_msg}" with title "{safe_title}"'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def parse_family_meta(note: str) -> dict:
+    """从备注字符串提取结构化家庭组、角色、干净说明与风险标记"""
+    raw = (note or "").strip()
+    flagged = any(k in raw for k in FLAG_KEYWORDS)
+    m = FAMILY_RE.match(raw)
+    if m:
+        grp = m.group(1).upper()
+        role_raw = m.group(2) or ""
+        is_mgr = role_raw in ("主", "管理员")
+        clean = (m.group(3) or "").strip()
+        return {
+            "family_group": grp,
+            "is_manager": is_mgr,
+            "clean_note": clean,
+            "explicit_solo": "独享" in raw,
+            "flagged": flagged,
+        }
+    return {
+        "family_group": "",
+        "is_manager": False,
+        "clean_note": raw,
+        "explicit_solo": "独享" in raw,
+        "flagged": flagged,
+    }
 
 
 def natural_sort_key(name: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
-
-
-def detect_running_ide_instance():
-    """检测当前正在运行的 Antigravity IDE 属于哪个实例，返回 (instance_id, pid)"""
-    try:
-        out = subprocess.check_output(
-            ["ps", "-eo", "pid,command"], text=True, stderr=subprocess.DEVNULL
-        )
-    except Exception:
-        return "", 0
-    found_main = None
-    for line in out.splitlines():
-        if "--type=" in line:
-            continue
-        if "Antigravity IDE.app/Contents/MacOS" in line:
-            parts = line.strip().split(None, 1)
-            pid = int(parts[0]) if parts and parts[0].isdigit() else 0
-            m_dir = re.search(r"\.antigravity_multi_instances/([^/\s\"']+)", line)
-            if m_dir:
-                return m_dir.group(1), pid
-            if found_main is None:
-                found_main = ("main", pid)
-    return found_main if found_main else ("", 0)
-
-
-def launch_ide_for_account(acc_id: str, workspace: str = ""):
-    """用指定账号隔离环境启动 Antigravity IDE（不关闭 Antigravity 主客户端，实现双 App 错号并行）"""
-    ide_bin = "/Applications/Antigravity IDE.app/Contents/MacOS/Electron"
-    if not os.path.exists(ide_bin):
-        raise ValueError("未在本机 /Applications 找到 Antigravity IDE.app")
-
-    # 只优雅退出旧的 Antigravity IDE，不动 Antigravity 主客户端
-    try:
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Antigravity IDE" to quit'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=4,
-        )
-    except Exception:
-        pass
-    for _ in range(16):
-        rid, _ = detect_running_ide_instance()
-        if not rid:
-            break
-        time.sleep(0.25)
-
-    if acc_id == "main":
-        cmd = ["open", "-a", "/Applications/Antigravity IDE.app"]
-        if workspace and os.path.isdir(workspace):
-            cmd.append(workspace)
-        subprocess.Popen(cmd)
-    else:
-        inst_dir = MULTI_DIR / acc_id
-        ide_data = inst_dir / "ide-data"
-        ide_data.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["HOME"] = str(inst_dir)
-        env["USERPROFILE"] = str(inst_dir)
-        cmd = [ide_bin, f"--user-data-dir={ide_data}"]
-        if workspace and os.path.isdir(workspace):
-            cmd.append(workspace)
-        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-
-    try:
-        msg = f"已用 {acc_id} 启动 Antigravity IDE（不影响当前 Antigravity）"
-        subprocess.run(
-            ["osascript", "-e", f'display notification "{msg}" with title "AGY Switch"'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
 
 
 def detect_running_instance():
@@ -146,15 +177,12 @@ def detect_running_instance():
         if "Antigravity.app/Contents/MacOS" in line or "Antigravity-" in line:
             parts = line.strip().split(None, 1)
             pid = int(parts[0]) if parts and parts[0].isdigit() else 0
-            # 1. 优先匹配隔离实例的 --user-data-dir 路径（最准确）
             m_dir = re.search(r"\.antigravity_multi_instances/([^/\s\"']+)", line)
             if m_dir:
                 return m_dir.group(1), pid
-            # 2. 其次匹配桌面 .app 名称
             m_app = re.search(r"Antigravity-([^/\s]+)\.app", line)
             if m_app:
                 return m_app.group(1), pid
-            # 3. 最后才是主账号
             if "/Applications/Antigravity.app" in line and found_main is None:
                 found_main = ("main", pid)
     return found_main if found_main else ("", 0)
@@ -164,14 +192,13 @@ def _parse_iso_ts(ts_str: str) -> float:
     if not ts_str:
         return 0.0
     try:
-        s = ts_str.replace("Z", "+00:00")
-        return datetime.fromisoformat(s).timestamp()
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
     except Exception:
         return 0.0
 
 
 def scan_account_metrics(gemini_dir: Path):
-    """统计该账号近 5 小时窗口与近 7 天（周）窗口的对话轮数、重置倒计时与最近活跃时间"""
+    """统计该账号近 5 小时窗口与近 7 天窗口的真实本地对话轮数、重置倒计时与最近活跃时间"""
     pattern = str(gemini_dir / "antigravity" / "brain" / "*" / ".system_generated" / "logs" / "transcript.jsonl")
     files = [f for f in glob.glob(pattern) if os.path.isfile(f) and os.path.getsize(f) > 0]
     now = time.time()
@@ -190,9 +217,8 @@ def scan_account_metrics(gemini_dir: Path):
         if mtime > latest_mtime:
             latest_mtime = mtime
         conv_id = Path(f).parts[-4] if len(Path(f).parts) >= 4 else "unknown"
-        sessions.append({"path": f, "conv_id": conv_id, "mtime": mtime})
+        sessions.append({"path": f, "real_path": os.path.realpath(f), "conv_id": conv_id, "mtime": mtime})
 
-        # 只扫描近 7 天内有更新的 transcript，保证毫秒级速度
         if mtime >= cutoff_7d:
             bytes_7d += os.path.getsize(f)
             try:
@@ -229,24 +255,59 @@ def scan_account_metrics(gemini_dir: Path):
     }
 
 
+def pick_best_candidates(accounts: list, running_id: str) -> list:
+    """
+    跨家庭组智能选号排序引擎：
+    优先级：1. 排除同家庭组  2. 独享组优先  3. 近 5h 轮数最少  4. 近 7d 轮数最少  5. 最久未活跃
+    自动跳过未登录、冷却中、启动器缺失、当前运行中及带风控/二次验证标记的账号。
+    """
+    active_acc = next((a for a in accounts if a["id"] == running_id), None)
+    active_grp = active_acc["family_group"] if active_acc else ""
+
+    eligible = [
+        a for a in accounts
+        if a["logged_in"]
+        and a["health"] != "cooldown"
+        and a["app_exists"]
+        and not a["running"]
+        and not a["flagged"]
+    ]
+
+    def sort_key(a: dict):
+        same_grp = 1 if (active_grp and a["family_group"] == active_grp) else 0
+        not_solo = 0 if a["solo_group"] else 1
+        return (same_grp, not_solo, a["turns_5h"], a["turns_7d"], a["latest_mtime"])
+
+    eligible.sort(key=sort_key)
+    for idx, a in enumerate(eligible):
+        same_grp = bool(active_grp and a["family_group"] == active_grp)
+        if same_grp:
+            a["recommend_reason"] = f"同组兜底 ({a['family_group']}组)"
+        elif a["solo_group"]:
+            a["recommend_reason"] = f"跨组首选 · {a['family_group'] or '独立'}组独享"
+        elif a["family_group"]:
+            a["recommend_reason"] = f"跨组满血 · {a['family_group']}组" if idx == 0 else f"跨组可用 · {a['family_group']}组"
+        else:
+            a["recommend_reason"] = "空闲可用"
+    return eligible
+
+
 def list_accounts(state: dict):
     running_id, running_pid = detect_running_instance()
-    running_ide_id, running_ide_pid = detect_running_ide_instance()
     now = time.time()
-    cooldowns = state.get("cooldowns", {})
+    cooldowns = state.get("cooldowns") or {}
+    notes = state.get("notes") or {}
+    calibrations = state.get("calibrations") or {}
+    limit_5h = int(state.get("warn_5h_limit", WARN_5H_LIMIT))
+    limit_7d = int(state.get("warn_7d_limit", WARN_7D_LIMIT))
+
     accounts = []
+    seen_real_sessions = set()
     all_sessions = []
 
-    # 1. 主账号
     main_metrics = scan_account_metrics(HOME / ".gemini")
-    for s in main_metrics["sessions"]:
-        s["account_id"] = "main"
-        s["account_label"] = "主账号 (~/.gemini)"
-        all_sessions.append(s)
-
     candidates = [("main", "主账号 (~/.gemini)", "/Applications/Antigravity.app", main_metrics)]
 
-    # 2. 隔离多开实例
     if MULTI_DIR.exists():
         dirs = [d for d in MULTI_DIR.iterdir() if d.is_dir()]
         dirs.sort(key=lambda d: natural_sort_key(d.name))
@@ -254,16 +315,29 @@ def list_accounts(state: dict):
             acc_id = d.name
             app_path = str(APP_DIR / f"Antigravity-{acc_id}.app")
             metrics = scan_account_metrics(d / ".gemini")
-            for s in metrics["sessions"]:
-                s["account_id"] = acc_id
-                s["account_label"] = acc_id
-                all_sessions.append(s)
             candidates.append((acc_id, acc_id, app_path, metrics))
 
-    limit_5h = int(state.get("warn_5h_limit", WARN_5H_LIMIT))
-    limit_7d = int(state.get("warn_7d_limit", WARN_7D_LIMIT))
-    notes = state.get("notes", {})
-    calibrations = state.get("calibrations", {})
+    # 收集去重后的最近会话（优先挂在当前运行账号名下，避免软链 brain 重复展示同一会话）
+    ordered_for_sessions = sorted(candidates, key=lambda c: 0 if c[0] == running_id else 1)
+    for acc_id, label, _, metrics in ordered_for_sessions:
+        for s in metrics["sessions"]:
+            rp = s.get("real_path", s["path"])
+            if rp in seen_real_sessions:
+                continue
+            seen_real_sessions.add(rp)
+            s_copy = dict(s)
+            s_copy["account_id"] = acc_id
+            s_copy["account_label"] = label
+            all_sessions.append(s_copy)
+
+    group_counts = {}
+    parsed_notes = {}
+    for acc_id, _, _, _ in candidates:
+        meta = parse_family_meta(notes.get(acc_id, ""))
+        parsed_notes[acc_id] = meta
+        grp = meta["family_group"]
+        if grp:
+            group_counts[grp] = group_counts.get(grp, 0) + 1
 
     for acc_id, label, app_path, metrics in candidates:
         cd_until = float(cooldowns.get(acc_id, 0) or 0)
@@ -278,22 +352,36 @@ def list_accounts(state: dict):
             logged_in = tok.exists() and tok.stat().st_size > 0
 
         cal = calibrations.get(acc_id)
-        if cal:
-            delta_5h = max(0, metrics["turns_5h"] - int(cal.get("base_5h", metrics["turns_5h"])))
-            delta_7d = max(0, metrics["turns_7d"] - int(cal.get("base_7d", metrics["turns_7d"])))
-            remain_5h_pct = max(0, min(100, int(round(float(cal.get("pct_5h", 100)) - delta_5h * 0.5))))
-            remain_7d_pct = max(0, min(100, int(round(float(cal.get("pct_7d", 100)) - delta_7d * 0.2))))
-            is_calibrated = True
+        is_calibrated = False
+        if isinstance(cal, dict):
+            cal_ts = float(cal.get("ts", 0) or 0)
+            age_sec = (now - cal_ts) if cal_ts > 0 else 0
+            # 5h 窗口超过 5 小时或本轮对话已完全归零时，自动恢复 5h 为 100%；7d 超过 7 天自动失效
+            if age_sec < 7 * 86400:
+                is_calibrated = True
+                if age_sec >= 5 * 3600 or (metrics["turns_5h"] == 0 and int(cal.get("base_5h", 0)) > 0):
+                    remain_5h_pct = 100
+                else:
+                    delta_5h = max(0, metrics["turns_5h"] - int(cal.get("base_5h", metrics["turns_5h"])))
+                    remain_5h_pct = max(0, min(100, int(round(float(cal.get("pct_5h", 100)) - delta_5h * 0.5))))
+                delta_7d = max(0, metrics["turns_7d"] - int(cal.get("base_7d", metrics["turns_7d"])))
+                remain_7d_pct = max(0, min(100, int(round(float(cal.get("pct_7d", 100)) - delta_7d * 0.2))))
+            else:
+                remain_5h_pct = max(0, 100 - int(round(metrics["turns_5h"] / max(1, limit_5h) * 100)))
+                remain_7d_pct = max(0, 100 - int(round(metrics["turns_7d"] / max(1, limit_7d) * 100)))
         else:
             remain_5h_pct = max(0, 100 - int(round(metrics["turns_5h"] / max(1, limit_5h) * 100)))
             remain_7d_pct = max(0, 100 - int(round(metrics["turns_7d"] / max(1, limit_7d) * 100)))
-            is_calibrated = False
+
+        meta = parsed_notes[acc_id]
+        grp = meta["family_group"]
+        is_solo = bool(meta["explicit_solo"] or (grp and group_counts.get(grp, 0) == 1))
 
         if not logged_in:
             health = "unverified"
         elif in_cooldown:
             health = "cooldown"
-        elif remain_5h_pct <= 20 or remain_7d_pct <= 20:
+        elif meta["flagged"] or remain_5h_pct <= 20 or remain_7d_pct <= 20:
             health = "warning"
         else:
             health = "ready"
@@ -302,6 +390,13 @@ def list_accounts(state: dict):
             "id": acc_id,
             "label": label,
             "note": notes.get(acc_id, ""),
+            "family_group": grp,
+            "is_manager": meta["is_manager"],
+            "solo_group": is_solo,
+            "explicit_solo": meta["explicit_solo"],
+            "flagged": meta["flagged"],
+            "clean_note": meta["clean_note"],
+            "recommend_reason": "",
             "logged_in": logged_in,
             "calibrated": is_calibrated,
             "remain_5h_pct": remain_5h_pct,
@@ -310,8 +405,6 @@ def list_accounts(state: dict):
             "app_exists": os.path.exists(app_path),
             "running": running_id == acc_id,
             "pid": running_pid if running_id == acc_id else 0,
-            "running_ide": running_ide_id == acc_id,
-            "ide_pid": running_ide_pid if running_ide_id == acc_id else 0,
             "health": health,
             "turns_5h": metrics["turns_5h"],
             "limit_5h": limit_5h,
@@ -324,6 +417,9 @@ def list_accounts(state: dict):
             "cooldown_remaining_min": remaining_min,
         })
 
+    ranked = pick_best_candidates(accounts, running_id)
+    recommended_ids = [a["id"] for a in ranked[:6]]
+
     all_sessions.sort(key=lambda x: x["mtime"], reverse=True)
     recent_sessions = [
         {
@@ -335,18 +431,18 @@ def list_accounts(state: dict):
         }
         for s in all_sessions[:8]
     ]
-    return accounts, recent_sessions, running_id
+    return accounts, recent_sessions, running_id, recommended_ids
 
 
 def generate_handoff(workspace: str, transcript_path: str = "", max_turns: int = 12, extra_note: str = "") -> dict:
-    """生成 HANDOFF_AUTO.md（附带 git status 摘要与用户特别交代），并复制接力词到剪贴板"""
+    """生成 HANDOFF_AUTO.md（附带 git status 摘要与用户特别交代），归档旧交接单并复制接力词到剪贴板"""
     ws = Path(workspace)
     if not ws.exists():
         raise ValueError(f"工作区目录不存在: {workspace}")
 
     if not transcript_path:
         state = load_state()
-        _, sessions, _ = list_accounts(state)
+        _, sessions, _, _ = list_accounts(state)
         if not sessions:
             raise ValueError("未找到任何可用的 transcript.jsonl 日志")
         transcript_path = sessions[0]["path"]
@@ -405,17 +501,17 @@ def generate_handoff(workspace: str, transcript_path: str = "", max_turns: int =
         lines.append("")
 
     out_path = ws / "HANDOFF_AUTO.md"
-    # 归档旧交接单，防止覆盖丢失上下文（最多保留 10 份）
     if out_path.exists() and out_path.stat().st_size > 0:
         hist_dir = ws / ".handoff_history"
         hist_dir.mkdir(exist_ok=True)
         stamp = datetime.fromtimestamp(out_path.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
         backup = hist_dir / f"HANDOFF_{stamp}.md"
-        if not backup.exists():
-            try:
-                backup.write_bytes(out_path.read_bytes())
-            except Exception:
-                pass
+        if backup.exists():
+            backup = hist_dir / f"HANDOFF_{stamp}_{int(time.time() * 1000) % 1000:03d}.md"
+        try:
+            backup.write_bytes(out_path.read_bytes())
+        except Exception:
+            pass
         old_files = sorted(hist_dir.glob("HANDOFF_*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
         for stale in old_files[10:]:
             try:
@@ -425,9 +521,8 @@ def generate_handoff(workspace: str, transcript_path: str = "", max_turns: int =
 
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
-    # 写入剪贴板
     try:
-        subprocess.run(["pbcopy"], input=RELAY_PROMPT, text=True, check=False)
+        subprocess.run(["/usr/bin/pbcopy"], input=RELAY_PROMPT, text=True, check=False, timeout=2)
     except Exception:
         pass
 
@@ -470,23 +565,28 @@ def _sqlite_safe_copy(src: Path, dst: Path):
 
 
 def _merge_dir_into(src: Path, dst: Path):
-    """将 src 中独有的文件/目录合并到 dst，不覆盖已有项。"""
+    """递归合并 src 中独有的文件/子目录到 dst，绝不删除冲突未迁移文件"""
     dst.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
+    for item in list(src.iterdir()):
         target = dst / item.name
         if not target.exists():
             try:
                 shutil.move(str(item), str(target))
             except Exception:
                 pass
+        elif item.is_dir() and target.is_dir() and not target.is_symlink():
+            _merge_dir_into(item, target)
+            try:
+                item.rmdir()
+            except OSError:
+                pass
 
 
 def sync_conversations(source_id: str, target_id: str):
     """
-    跨账号安全同步纯本地对话历史与索引（仅在旧 Antigravity 彻底退出后、新实例启动前调用）。
-    - conversations / brain / annotations：统一软链共享主目录，零重复占用空间。
-    - conversation_summaries.db / agyhub_summaries_proto.pb：安全同步最新索引。
-    - 绝不触碰 installation_id、state.vscdb、登录凭据等隔离文件。
+    跨账号安全同步本地会话列表与历史索引（仅在旧进程已确认退出后执行）：
+    - 仅共享 conversations 与 annotations 目录（保持每个隔离账号 brain 日志统计独立，不污染轮数！）
+    - 安全备份同步 conversation_summaries.db 与 agyhub_summaries_proto.pb
     """
     canonical = HOME / ".gemini" / "antigravity"
     source_ag = account_ag_dir(source_id)
@@ -495,8 +595,7 @@ def sync_conversations(source_id: str, target_id: str):
         return
     target_ag.mkdir(parents=True, exist_ok=True)
 
-    # 1. 目录软链共享（先合并独有对话再软链，绝不丢数据）
-    for dname in ("conversations", "brain", "annotations"):
+    for dname in ("conversations", "annotations"):
         canon_d = canonical / dname
         canon_d.mkdir(parents=True, exist_ok=True)
         for ag_dir in (source_ag, target_ag):
@@ -512,13 +611,18 @@ def sync_conversations(source_id: str, target_id: str):
                 d.unlink()
             elif d.exists() and d.is_dir():
                 _merge_dir_into(d, canon_d)
-                shutil.rmtree(d, ignore_errors=True)
+                # 仅在目录已完全排空时才移除并建软链；若有冲突文件则移入备份目录保留，绝不丢数据
+                remaining = list(d.iterdir())
+                if remaining:
+                    bak = ag_dir / f"{dname}.conflict_bak_{int(time.time())}"
+                    d.rename(bak)
+                else:
+                    d.rmdir()
             try:
                 d.symlink_to(canon_d)
             except Exception:
                 pass
 
-    # 2. 同步 conversation_summaries.db（优先取记录更全/更新的库回写到主库，再同步到目标号）
     canon_db = canonical / "conversation_summaries.db"
     src_db = source_ag / "conversation_summaries.db"
     tgt_db = target_ag / "conversation_summaries.db"
@@ -528,9 +632,7 @@ def sync_conversations(source_id: str, target_id: str):
             return (0, 0.0)
         try:
             st = p.stat()
-            # 超过 128KB 才视为包含完整历史，避免空新号覆盖主库
-            has_history = 1 if st.st_size > 131072 else 0
-            return (has_history, st.st_mtime)
+            return (1 if st.st_size > 131072 else 0, st.st_mtime)
         except Exception:
             return (0, 0.0)
 
@@ -541,7 +643,6 @@ def sync_conversations(source_id: str, target_id: str):
     if canon_db.exists() and tgt_db.resolve() != canon_db.resolve():
         _sqlite_safe_copy(canon_db, tgt_db)
 
-    # 3. 同步 agyhub_summaries_proto.pb
     canon_pb = canonical / "agyhub_summaries_proto.pb"
     src_pb = source_ag / "agyhub_summaries_proto.pb"
     tgt_pb = target_ag / "agyhub_summaries_proto.pb"
@@ -560,203 +661,65 @@ def sync_conversations(source_id: str, target_id: str):
             pass
 
 
-def switch_account_async(target_app: str, target_label: str, source_id: str = "", target_id: str = ""):
-    """后台执行：优雅退出当前 Antigravity -> 轮询确认完全退出 -> 同步对话历史 -> 拉起目标账号"""
-    try:
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Antigravity" to quit'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
-    except Exception:
-        pass
+def perform_switch(target_app: str, target_label: str, source_id: str = "", target_id: str = "") -> None:
+    """
+    安全切号编排（在 state_lock 之外运行，不阻塞状态查询）：
+    1. 发送优雅退出 -> 轮询最多 6 秒；
+    2. 若仍未退出，向该主进程发送 SIGTERM 再等 2 秒；
+    3. 若依然未退出，抛出异常中止拉起新号，彻底杜绝双实例并发串号！
+    """
+    rid, pid = detect_running_instance()
+    if rid:
+        try:
+            subprocess.run(
+                ["/usr/bin/osascript", "-e", 'tell application "Antigravity" to quit'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            pass
 
-    # 轮询等待旧进程彻底退出（最多 6 秒），避免新旧实例抢占 Keychain
-    for _ in range(24):
-        rid, _ = detect_running_instance()
-        if not rid:
-            break
-        time.sleep(0.25)
+        for _ in range(24):
+            rid, pid = detect_running_instance()
+            if not rid:
+                break
+            time.sleep(0.25)
 
-    # 旧进程彻底退出后，安全同步跨账号对话历史
+        if rid and pid > 0:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            for _ in range(8):
+                rid, _ = detect_running_instance()
+                if not rid:
+                    break
+                time.sleep(0.25)
+
+        if rid:
+            raise RuntimeError(f"旧实例 ({rid}) 未完全退出，已中止启动新号以防 Keychain 串号，请先保存并关闭当前窗口后重试")
+
     if target_id:
         try:
             sync_conversations(source_id or "main", target_id)
         except Exception:
             pass
 
-    time.sleep(0.3)
-    subprocess.Popen(["open", "-n", target_app])
-    try:
-        msg = f"已切换到 {target_label}，接力词已复制，Cmd+V 即可继续"
-        subprocess.run(
-            ["osascript", "-e", f'display notification "{msg}" with title "AGY Switch"'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        return
-
-    def _send_json(self, data: dict, status: int = 200):
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0:
-            return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html"):
-            html_path = Path(__file__).parent / "index.html"
-            body = html_path.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        if parsed.path == "/api/status":
-            state = load_state()
-            workspace = state.get("workspace", DEFAULT_WORKSPACE)
-            accounts, sessions, running_id = list_accounts(state)
-            handoff_file = Path(workspace) / "HANDOFF_AUTO.md"
-            handoff_info = None
-            if handoff_file.exists():
-                st = handoff_file.stat()
-                handoff_info = {
-                    "path": str(handoff_file),
-                    "updated": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "size_kb": round(st.st_size / 1024, 1),
-                }
-            self._send_json({
-                "workspace": workspace,
-                "running_id": running_id,
-                "accounts": accounts,
-                "sessions": sessions,
-                "handoff": handoff_info,
-                "warn_5h_limit": WARN_5H_LIMIT,
-                "warn_7d_limit": WARN_7D_LIMIT,
-            })
-            return
-
-        self._send_json({"error": "Not found"}, 404)
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        try:
-            payload = self._read_json()
-        except Exception as e:
-            self._send_json({"error": f"Invalid JSON: {e}"}, 400)
-            return
-
-        state = load_state()
-
-        if parsed.path == "/api/workspace":
-            ws = (payload.get("workspace") or "").strip()
-            if not ws or not os.path.isdir(ws):
-                self._send_json({"error": "目录不存在"}, 400)
-                return
-            state["workspace"] = ws
-            save_state(state)
-            self._send_json({"ok": True, "workspace": ws})
-            return
-
-        if parsed.path == "/api/cooldown":
-            acc_id = payload.get("account_id")
-            hours = float(payload.get("hours", 5))
-            if not acc_id:
-                self._send_json({"error": "缺少 account_id"}, 400)
-                return
-            if hours <= 0:
-                state.setdefault("cooldowns", {}).pop(acc_id, None)
-            else:
-                state.setdefault("cooldowns", {})[acc_id] = time.time() + hours * 3600
-            save_state(state)
-            self._send_json({"ok": True})
-            return
-
-        if parsed.path == "/api/handoff":
-            ws = payload.get("workspace") or state.get("workspace", DEFAULT_WORKSPACE)
-            transcript = payload.get("transcript_path", "")
-            try:
-                res = generate_handoff(ws, transcript)
-                self._send_json({"ok": True, **res})
-            except Exception as e:
-                self._send_json({"error": str(e)}, 500)
-            return
-
-        if parsed.path == "/api/switch":
-            target_id = payload.get("target_id", "")
-            mark_current_cooldown = bool(payload.get("mark_current_cooldown", True))
-            accounts, _, running_id = list_accounts(state)
-
-            # 若未指定目标，自动挑选最空闲的满血号
-            if not target_id:
-                ready = [a for a in accounts if a["health"] == "ready" and not a["running"] and a["app_exists"]]
-                ready.sort(key=lambda a: (a["turns_5h"], a["turns_7d"], a["latest_mtime"]))
-                if not ready:
-                    self._send_json({"error": "没有可用的满血账号，请先重置某个账号的冷却状态"}, 400)
-                    return
-                target = ready[0]
-            else:
-                matched = [a for a in accounts if a["id"] == target_id]
-                if not matched:
-                    self._send_json({"error": f"未找到账号 {target_id}"}, 404)
-                    return
-                target = matched[0]
-                if not target["app_exists"]:
-                    self._send_json({"error": f"启动器不存在: {target['app_path']}"}, 400)
-                    return
-
-            ws = state.get("workspace", DEFAULT_WORKSPACE)
-            handoff_res = generate_handoff(ws)
-
-            if mark_current_cooldown and running_id and running_id != target["id"]:
-                state.setdefault("cooldowns", {})[running_id] = time.time() + 5 * 3600
-                save_state(state)
-
-            threading.Thread(
-                target=switch_account_async,
-                args=(target["app_path"], target["label"], running_id or "main", target["id"]),
-                daemon=True,
-            ).start()
-
-            self._send_json({
-                "ok": True,
-                "switched_to": target["label"],
-                "handoff": handoff_res,
-            })
-            return
-
-        self._send_json({"error": "Not found"}, 404)
+    time.sleep(0.25)
+    subprocess.Popen(["/usr/bin/open", "-n", target_app])
+    notify_macos(f"已切换到 {target_label}，接力词已复制，Cmd+V 即可继续")
 
 
 def add_account(acc_id: str, note: str, state: dict) -> dict:
     """新建隔离账号实例 + 公共环境软链 + 桌面 .app 启动器"""
-    acc_id = acc_id.strip()
-    if not acc_id or not re.match(r"^[A-Za-z0-9._-]{2,48}$", acc_id) or acc_id == "main":
-        raise ValueError("账号标识仅支持 2-48 位字母、数字、点、横线或下划线，且不能为 main")
+    acc_id = validate_isolated_acc_id(acc_id)
 
     inst_dir = MULTI_DIR / acc_id
     app_bundle = APP_DIR / f"Antigravity-{acc_id}.app"
     if inst_dir.exists() or app_bundle.exists():
         raise ValueError(f"账号 {acc_id} 已存在")
 
-    # 1. 创建隔离目录并软链公共环境
     (inst_dir / ".gemini" / "config").mkdir(parents=True, exist_ok=True)
     (inst_dir / "data").mkdir(parents=True, exist_ok=True)
     for rel in [".zshrc", ".zprofile", ".gitconfig", ".ssh", ".local", ".visionpower", ".config"]:
@@ -769,7 +732,6 @@ def add_account(acc_id: str, note: str, state: dict) -> dict:
     if skills_src.exists() and not skills_dst.exists():
         os.symlink(str(skills_src), str(skills_dst))
 
-    # 2. 创建 .app 启动器
     macos_dir = app_bundle / "Contents" / "MacOS"
     macos_dir.mkdir(parents=True, exist_ok=True)
     info_plist = app_bundle / "Contents" / "Info.plist"
@@ -795,7 +757,7 @@ def add_account(acc_id: str, note: str, state: dict) -> dict:
 export HOME="{inst_dir}"
 export USERPROFILE="{inst_dir}"
 export SSH_TTY=1
-exec "/Applications/Antigravity.app/Contents/MacOS/Antigravity" --user-data-dir="{inst_dir}/data"
+exec "/Applications/Antigravity.app/Contents/MacOS/Antigravity" --user-data-dir="{inst_dir}/data" "$@"
 """,
         encoding="utf-8",
     )
@@ -808,10 +770,10 @@ exec "/Applications/Antigravity.app/Contents/MacOS/Antigravity" --user-data-dir=
 
 
 def delete_account(acc_id: str, state: dict) -> dict:
-    """安全删除隔离账号：移入 ~/.Trash 防误删"""
-    if not acc_id or acc_id == "main":
-        raise ValueError("主账号受保护，不可删除")
+    """安全删除隔离账号：白名单路径校验后移入 ~/.Trash 防误删"""
+    acc_id = validate_isolated_acc_id(acc_id)
     trash = HOME / ".Trash"
+    trash.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     inst_dir = MULTI_DIR / acc_id
     app_bundle = APP_DIR / f"Antigravity-{acc_id}.app"
@@ -821,25 +783,26 @@ def delete_account(acc_id: str, state: dict) -> dict:
         app_bundle.rename(trash / f"Antigravity-{acc_id}_{stamp}.app")
     state.setdefault("cooldowns", {}).pop(acc_id, None)
     state.setdefault("notes", {}).pop(acc_id, None)
+    state.setdefault("calibrations", {}).pop(acc_id, None)
     save_state(state)
     return {"ok": True, "deleted": acc_id}
 
 
 def run_doctor(state: dict) -> dict:
-    """本地运行环境体检：实例冲突、启动器、软链、交接单、进程内存"""
+    """本地运行环境 7 项深度体检"""
     checks = []
 
-    # 1. 检测当前运行的 Antigravity 主进程数量（防止多开抢 Keychain）
     running_procs = []
     try:
         out = subprocess.check_output(["ps", "-eo", "pid,rss,command"], text=True, stderr=subprocess.DEVNULL)
         for line in out.splitlines():
-            if ("Antigravity.app/Contents/MacOS/Electron" in line or "Antigravity.app/Contents/MacOS/Antigravity" in line) and "--type=" not in line:
+            if (
+                "Antigravity.app/Contents/MacOS/Electron" in line
+                or "Antigravity.app/Contents/MacOS/Antigravity" in line
+            ) and "--type=" not in line:
                 parts = line.strip().split(None, 2)
                 if len(parts) >= 2:
-                    pid = int(parts[0])
-                    mem_mb = round(int(parts[1]) / 1024, 1)
-                    running_procs.append((pid, mem_mb))
+                    running_procs.append((int(parts[0]), round(int(parts[1]) / 1024, 1)))
     except Exception:
         pass
 
@@ -852,7 +815,6 @@ def run_doctor(state: dict) -> dict:
         pids = ", ".join(str(p[0]) for p in running_procs)
         checks.append({"name": "Antigravity 运行实例", "status": "warn", "detail": f"检测到 {len(running_procs)} 个实例同时运行 (PID: {pids})，建议只开 1 个防 Keychain 串号"})
 
-    # 2. 检查隔离实例目录与启动器 .app 匹配度
     inst_dirs = [d for d in MULTI_DIR.iterdir() if d.is_dir()] if MULTI_DIR.exists() else []
     missing_apps = [d.name for d in inst_dirs if not (APP_DIR / f"Antigravity-{d.name}.app").exists()]
     if not inst_dirs:
@@ -862,18 +824,12 @@ def run_doctor(state: dict) -> dict:
     else:
         checks.append({"name": "多开启动器 (.app)", "status": "error", "detail": f"缺少启动器: {', '.join(missing_apps[:3])}"})
 
-    # 3. 检查公共环境软链 (.gemini/config/skills & .local)
-    broken_links = []
-    for d in inst_dirs:
-        skills_link = d / ".gemini" / "config" / "skills"
-        if not skills_link.exists():
-            broken_links.append(d.name)
+    broken_links = [d.name for d in inst_dirs if not (d / ".gemini" / "config" / "skills").exists()]
     if not broken_links:
         checks.append({"name": "公共环境与 Skills 软链", "status": "ok", "detail": f"全部 {len(inst_dirs)} 个隔离实例已正常软链公共 Skills"})
     else:
         checks.append({"name": "公共环境与 Skills 软链", "status": "warn", "detail": f"{len(broken_links)} 个实例缺少 Skills 软链: {', '.join(broken_links[:3])}"})
 
-    # 4. 检查工作区与 HANDOFF_AUTO.md
     ws = Path(state.get("workspace", DEFAULT_WORKSPACE))
     hf = ws / "HANDOFF_AUTO.md"
     if not ws.exists():
@@ -883,20 +839,30 @@ def run_doctor(state: dict) -> dict:
         kb = round(hf.stat().st_size / 1024, 1)
         checks.append({"name": "接力工作区与交接单", "status": "ok", "detail": f"工作区正常 · HANDOFF_AUTO.md 就绪 ({kb} KB, 更新于 {upd})"})
     else:
-        checks.append({"name": "接力工作区与交接单", "status": "warn", "detail": f"工作区正常，但尚未生成 HANDOFF_AUTO.md"})
+        checks.append({"name": "接力工作区与交接单", "status": "warn", "detail": "工作区正常，但尚未生成 HANDOFF_AUTO.md"})
 
-    # 5. 检查隔离实例 brain 是否被软链共享（会导致统计与主账号重叠）
-    shared_brains = []
-    for d in inst_dirs:
-        b = d / ".gemini" / "antigravity" / "brain"
-        if b.is_symlink():
-            shared_brains.append(d.name)
+    shared_brains = [d.name for d in inst_dirs if (d / ".gemini" / "antigravity" / "brain").is_symlink()]
     if not shared_brains:
         checks.append({"name": "对话日志隔离 (brain)", "status": "ok", "detail": "所有隔离实例均拥有独立 brain 日志目录"})
     else:
-        checks.append({"name": "对话日志隔离 (brain)", "status": "warn", "detail": f"{', '.join(shared_brains)} 的 brain 软链到了主账号，本地轮数统计会与主账号重叠"})
+        checks.append({"name": "对话日志隔离 (brain)", "status": "warn", "detail": f"{', '.join(shared_brains)} 的历史 brain 软链到了主账号（v5.0 新切号仅共享 conversations 索引，不再软链 brain）"})
 
-    # 6. 检查 agy-relay CLI
+    notes = state.get("notes") or {}
+    flagged_accs = [k for k, v in notes.items() if parse_family_meta(v)["flagged"]]
+    grouped_accs = [k for k, v in notes.items() if parse_family_meta(v)["family_group"]]
+    if flagged_accs:
+        checks.append({
+            "name": "家庭组与风控标记",
+            "status": "warn",
+            "detail": f"已标注 {len(grouped_accs)} 个家庭组账号；检测到异常/待验证标记：{', '.join(flagged_accs)}（自动选号已跳过）",
+        })
+    else:
+        checks.append({
+            "name": "家庭组与风控标记",
+            "status": "ok",
+            "detail": f"已标注 {len(grouped_accs)} 个家庭组账号，无风控或二次验证警告",
+        })
+
     relay_bin = HOME / ".local" / "bin" / "agy-relay"
     if relay_bin.exists() and os.access(relay_bin, os.X_OK):
         checks.append({"name": "agy-relay 接力脚本", "status": "ok", "detail": f"就绪 ({relay_bin})"})
@@ -909,10 +875,13 @@ def run_doctor(state: dict) -> dict:
     }
 
 
+def _read_state_snapshot() -> dict:
+    with state_lock(shared=True):
+        return load_state()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="AGY Switch - Antigravity 多账号池监控与一键接力")
-    parser.add_argument("--port", type=int, default=17980, help="监听端口（默认 17980）")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    parser = argparse.ArgumentParser(description="AGY Switch v5.0 CLI Engine")
     parser.add_argument("--cli-status", action="store_true", help="输出当前账号池状态 JSON")
     parser.add_argument("--cli-doctor", action="store_true", help="输出本地运行环境体检 JSON")
     parser.add_argument("--cli-add", nargs=2, metavar=("ACC_ID", "NOTE"), help="新增隔离账号实例与启动器")
@@ -923,37 +892,22 @@ def main():
     parser.add_argument("--cli-handoff", action="store_true", help="生成 HANDOFF_AUTO.md 并复制接力词")
     parser.add_argument("--cli-handoff-save", nargs=2, metavar=("TRANSCRIPT", "NOTE"), help="按指定日志与特别交代生成交接单")
     parser.add_argument("--cli-config", nargs=3, metavar=("WORKSPACE", "LIMIT_5H", "LIMIT_7D"), help="更新工作区与预警阈值")
-    parser.add_argument("--cli-switch", nargs="?", const="", default=None, help="一键切换账号（空串=自动选满血号）")
-    parser.add_argument("--cli-launch-ide", metavar="ACC_ID", help="用指定账号启动 Antigravity IDE（双 App 错号并行）")
+    parser.add_argument("--cli-switch", nargs="?", const="", default=None, help="一键切换账号（空串=跨家庭组智能选满血号）")
     parser.add_argument("--cli-cooldown", nargs=2, metavar=("ACC_ID", "HOURS"), help="设置账号冷却小时数（0=恢复满血）")
     parser.add_argument("--cli-clear-cooldowns", action="store_true", help="一键解除全部账号冷却")
     parser.add_argument("--cli-restore-handoff", metavar="FILENAME", help="从 .handoff_history 恢复指定交接单")
     parser.add_argument("--cli-workspaces", nargs=2, metavar=("ACTION", "PATH"), help="管理常用工作区列表 (add|use|remove)")
     args = parser.parse_args()
 
-    state = load_state()
-    if args.cli_add:
-        try:
-            print(json.dumps(add_account(args.cli_add[0], args.cli_add[1], state), ensure_ascii=False))
-        except Exception as e:
-            print(json.dumps({"error": str(e)}, ensure_ascii=False))
-        return
-
-    if args.cli_delete:
-        try:
-            print(json.dumps(delete_account(args.cli_delete, state), ensure_ascii=False))
-        except Exception as e:
-            print(json.dumps({"error": str(e)}, ensure_ascii=False))
-        return
-
-    if args.cli_autostart:
-        plist = HOME / "Library" / "LaunchAgents" / "io.agyswitch.app.plist"
-        if args.cli_autostart == "status":
-            print(json.dumps({"enabled": plist.exists()}, ensure_ascii=False))
-        elif args.cli_autostart == "on":
-            plist.parent.mkdir(parents=True, exist_ok=True)
-            plist.write_text(
-                """<?xml version="1.0" encoding="UTF-8"?>
+    try:
+        if args.cli_autostart:
+            plist = HOME / "Library" / "LaunchAgents" / "io.agyswitch.app.plist"
+            if args.cli_autostart == "status":
+                print(json.dumps({"enabled": plist.exists()}, ensure_ascii=False))
+            elif args.cli_autostart == "on":
+                plist.parent.mkdir(parents=True, exist_ok=True)
+                plist.write_text(
+                    """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -970,202 +924,256 @@ def main():
 </dict>
 </plist>
 """,
-                encoding="utf-8",
-            )
-            print(json.dumps({"ok": True, "enabled": True}, ensure_ascii=False))
-        else:
-            if plist.exists():
-                plist.unlink()
-            print(json.dumps({"ok": True, "enabled": False}, ensure_ascii=False))
-        return
+                    encoding="utf-8",
+                )
+                print(json.dumps({"ok": True, "enabled": True}, ensure_ascii=False))
+            else:
+                if plist.exists():
+                    plist.unlink()
+                print(json.dumps({"ok": True, "enabled": False}, ensure_ascii=False))
+            return
 
-    if args.cli_calibrate:
-        acc_id, p5, p7 = args.cli_calibrate
-        accounts, _, _ = list_accounts(state)
-        matched = [a for a in accounts if a["id"] == acc_id]
-        base_5h = matched[0]["turns_5h"] if matched else 0
-        base_7d = matched[0]["turns_7d"] if matched else 0
-        state.setdefault("calibrations", {})[acc_id] = {
-            "pct_5h": max(0, min(100, int(float(p5)))),
-            "pct_7d": max(0, min(100, int(float(p7)))),
-            "base_5h": base_5h,
-            "base_7d": base_7d,
-            "updated_at": datetime.now().strftime("%m-%d %H:%M"),
-        }
-        save_state(state)
-        print(json.dumps({"ok": True}, ensure_ascii=False))
-        return
+        # 只读命令：毫秒级读取快照后立即释放共享锁，绝不阻塞并发写操作
+        if args.cli_doctor:
+            state = _read_state_snapshot()
+            print(json.dumps(run_doctor(state), ensure_ascii=False))
+            return
 
-    if args.cli_note:
-        acc_id, note = args.cli_note
-        if note.strip():
-            state.setdefault("notes", {})[acc_id] = note.strip()
-        else:
-            state.setdefault("notes", {}).pop(acc_id, None)
-        save_state(state)
-        print(json.dumps({"ok": True}, ensure_ascii=False))
-        return
+        if args.cli_status:
+            state = _read_state_snapshot()
+            ws = state.get("workspace", DEFAULT_WORKSPACE)
+            accounts, sessions, running_id, recommended_ids = list_accounts(state)
+            hf_path = Path(ws) / "HANDOFF_AUTO.md"
+            hf_preview = ""
+            hf_updated = ""
+            if hf_path.exists():
+                try:
+                    hf_preview = hf_path.read_text(encoding="utf-8", errors="replace")[:4000]
+                    hf_updated = datetime.fromtimestamp(hf_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+            hist_items = []
+            hist_dir = Path(ws) / ".handoff_history"
+            if hist_dir.exists():
+                for p in sorted(hist_dir.glob("HANDOFF_*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:10]:
+                    st = p.stat()
+                    hist_items.append({
+                        "name": p.name,
+                        "kb": round(st.st_size / 1024, 1),
+                        "time": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M"),
+                    })
+            ws_list = list(dict.fromkeys([ws] + [w for w in (state.get("workspaces") or []) if w]))
+            print(json.dumps({
+                "version": APP_VERSION,
+                "relay_prompt": RELAY_PROMPT,
+                "workspace": ws,
+                "workspaces": ws_list,
+                "running_id": running_id,
+                "recommended_ids": recommended_ids,
+                "accounts": accounts,
+                "sessions": sessions[:8],
+                "warn_5h_limit": int(state.get("warn_5h_limit", WARN_5H_LIMIT)),
+                "warn_7d_limit": int(state.get("warn_7d_limit", WARN_7D_LIMIT)),
+                "handoff_preview": hf_preview,
+                "handoff_updated": hf_updated,
+                "handoff_history": hist_items,
+                "last_switch": state.get("last_switch", ""),
+                "switch_history": (state.get("switch_history") or [])[:10],
+            }, ensure_ascii=False))
+            return
 
-    if args.cli_doctor:
-        print(json.dumps(run_doctor(state), ensure_ascii=False))
-        return
-
-    if args.cli_status:
-        ws = state.get("workspace", DEFAULT_WORKSPACE)
-        accounts, sessions, running_id = list_accounts(state)
-        hf_path = Path(ws) / "HANDOFF_AUTO.md"
-        hf_preview = ""
-        hf_updated = ""
-        if hf_path.exists():
+        if args.cli_restore_handoff:
+            state = _read_state_snapshot()
+            ws = Path(state.get("workspace", DEFAULT_WORKSPACE))
+            fname = os.path.basename(args.cli_restore_handoff)
+            src = ws / ".handoff_history" / fname
+            if not fname or not src.is_file():
+                print(json.dumps({"error": "历史交接单不存在"}, ensure_ascii=False))
+                return
+            (ws / "HANDOFF_AUTO.md").write_bytes(src.read_bytes())
             try:
-                hf_preview = hf_path.read_text(encoding="utf-8", errors="replace")[:4000]
-                hf_updated = datetime.fromtimestamp(hf_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                subprocess.run(["/usr/bin/pbcopy"], input=RELAY_PROMPT, text=True, check=False, timeout=2)
             except Exception:
                 pass
-        hist_items = []
-        hist_dir = Path(ws) / ".handoff_history"
-        if hist_dir.exists():
-            for p in sorted(hist_dir.glob("HANDOFF_*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:10]:
-                st = p.stat()
-                hist_items.append({
-                    "name": p.name,
-                    "kb": round(st.st_size / 1024, 1),
-                    "time": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M"),
-                })
-        ws_list = list(dict.fromkeys([ws] + [w for w in state.get("workspaces", []) if w]))
-        print(json.dumps({
-            "workspace": ws,
-            "workspaces": ws_list,
-            "running_id": running_id,
-            "accounts": accounts,
-            "sessions": sessions[:8],
-            "warn_5h_limit": int(state.get("warn_5h_limit", WARN_5H_LIMIT)),
-            "warn_7d_limit": int(state.get("warn_7d_limit", WARN_7D_LIMIT)),
-            "handoff_preview": hf_preview,
-            "handoff_updated": hf_updated,
-            "handoff_history": hist_items,
-            "last_switch": state.get("last_switch", ""),
-        }, ensure_ascii=False))
-        return
-
-    if args.cli_restore_handoff:
-        ws = Path(state.get("workspace", DEFAULT_WORKSPACE))
-        src = ws / ".handoff_history" / os.path.basename(args.cli_restore_handoff)
-        if not src.exists():
-            print(json.dumps({"error": "历史交接单不存在"}, ensure_ascii=False))
+            print(json.dumps({"ok": True, "restored": src.name}, ensure_ascii=False))
             return
-        (ws / "HANDOFF_AUTO.md").write_bytes(src.read_bytes())
-        try:
-            subprocess.run(["pbcopy"], input=RELAY_PROMPT, text=True, check=False)
-        except Exception:
-            pass
-        print(json.dumps({"ok": True, "restored": src.name}, ensure_ascii=False))
-        return
 
-    if args.cli_workspaces:
-        act, path_val = args.cli_workspaces
-        path_val = path_val.strip()
-        ws_list = list(state.get("workspaces", [DEFAULT_WORKSPACE]))
-        if act == "add" and os.path.isdir(path_val):
-            if path_val not in ws_list:
-                ws_list.append(path_val)
-            state["workspaces"] = ws_list
-            state["workspace"] = path_val
-            save_state(state)
-        elif act == "use" and os.path.isdir(path_val):
-            if path_val not in ws_list:
-                ws_list.append(path_val)
-            state["workspaces"] = ws_list
-            state["workspace"] = path_val
-            save_state(state)
-        elif act == "remove":
-            ws_list = [w for w in ws_list if w != path_val]
-            if not ws_list:
-                ws_list = [DEFAULT_WORKSPACE]
-            state["workspaces"] = ws_list
-            if state.get("workspace") == path_val:
-                state["workspace"] = ws_list[0]
-            save_state(state)
-        print(json.dumps({"ok": True, "workspace": state["workspace"], "workspaces": state["workspaces"]}, ensure_ascii=False))
-        return
+        if args.cli_handoff_save:
+            state = _read_state_snapshot()
+            tr, note = args.cli_handoff_save
+            res = generate_handoff(state.get("workspace", DEFAULT_WORKSPACE), tr, extra_note=note)
+            print(json.dumps({"ok": True, **res}, ensure_ascii=False))
+            return
 
-    if args.cli_config:
-        ws, l5, l7 = args.cli_config
-        if ws and os.path.isdir(ws):
-            state["workspace"] = ws
-        state["warn_5h_limit"] = max(10, int(l5))
-        state["warn_7d_limit"] = max(50, int(l7))
-        save_state(state)
-        print(json.dumps({"ok": True}, ensure_ascii=False))
-        return
+        if args.cli_handoff:
+            state = _read_state_snapshot()
+            res = generate_handoff(state.get("workspace", DEFAULT_WORKSPACE))
+            print(json.dumps({"ok": True, **res}, ensure_ascii=False))
+            return
 
-    if args.cli_handoff_save:
-        tr, note = args.cli_handoff_save
-        res = generate_handoff(state.get("workspace", DEFAULT_WORKSPACE), tr, extra_note=note)
-        print(json.dumps({"ok": True, **res}, ensure_ascii=False))
-        return
+        # 切号命令：先在锁外扫描并执行退旧号/拉新号，仅在切换真正成功后的毫秒级临界区内写入 state.json！
+        if args.cli_switch is not None:
+            target_id = args.cli_switch.strip()
+            snap = _read_state_snapshot()
+            accounts, sessions, running_id, _ = list_accounts(snap)
+            if not target_id:
+                ranked = pick_best_candidates(accounts, running_id)
+                if not ranked:
+                    print(json.dumps({"error": "没有可用的已登录账号（请检查冷却或风控状态）"}, ensure_ascii=False))
+                    return
+                target = ranked[0]
+            else:
+                if target_id != "main":
+                    target_id = validate_isolated_acc_id(target_id)
+                matched = [a for a in accounts if a["id"] == target_id]
+                if not matched:
+                    print(json.dumps({"error": f"未找到账号 {target_id}"}, ensure_ascii=False))
+                    return
+                target = matched[0]
+                if not target["app_exists"]:
+                    print(json.dumps({"error": f"桌面启动器不存在: {target['app_path']}"}, ensure_ascii=False))
+                    return
 
-    if args.cli_handoff:
-        res = generate_handoff(state.get("workspace", DEFAULT_WORKSPACE))
-        print(json.dumps({"ok": True, **res}, ensure_ascii=False))
-        return
+            ws = snap.get("workspace", DEFAULT_WORKSPACE)
+            latest_tr = sessions[0]["path"] if sessions else ""
+            try:
+                generate_handoff(ws, transcript_path=latest_tr)
+            except Exception:
+                pass
 
-    if args.cli_clear_cooldowns:
-        state["cooldowns"] = {}
-        save_state(state)
-        print(json.dumps({"ok": True}, ensure_ascii=False))
-        return
+            # 先执行安全退出与拉起（若旧实例拒绝退出则抛异常直接返回 error，不污染冷却与历史状态！）
+            perform_switch(target["app_path"], target["label"], running_id or "main", target["id"])
 
-    if args.cli_cooldown:
-        acc_id, hours_str = args.cli_cooldown
-        hours = float(hours_str)
-        if hours <= 0:
-            state.setdefault("cooldowns", {}).pop(acc_id, None)
-        else:
-            state.setdefault("cooldowns", {})[acc_id] = time.time() + hours * 3600
-        save_state(state)
-        print(json.dumps({"ok": True}, ensure_ascii=False))
-        return
+            src_acc = next((a for a in accounts if a["id"] == running_id), None)
+            src_grp = src_acc["family_group"] if src_acc else ""
+            tgt_grp = target["family_group"]
+            cross_group = bool(not src_grp or not tgt_grp or src_grp != tgt_grp)
+            now_fmt = datetime.now().strftime("%m-%d %H:%M")
+            reason_str = target.get("recommend_reason") or "手动指定"
 
-    if args.cli_launch_ide:
-        try:
-            ws = state.get("workspace", DEFAULT_WORKSPACE)
-            launch_ide_for_account(args.cli_launch_ide, ws)
-            print(json.dumps({"ok": True, "ide_account": args.cli_launch_ide}, ensure_ascii=False))
-        except Exception as e:
-            print(json.dumps({"error": str(e)}, ensure_ascii=False))
-        return
+            with state_lock(shared=False):
+                state = load_state()
+                if running_id and running_id != target["id"]:
+                    state.setdefault("cooldowns", {})[running_id] = time.time() + 5 * 3600
+                state["last_switch"] = f"{now_fmt} · {running_id or '无'} → {target['id']}"
+                hist = list(state.get("switch_history") or [])
+                hist.insert(0, {
+                    "time": now_fmt,
+                    "from_id": running_id or "无",
+                    "to_id": target["id"],
+                    "from_group": src_grp,
+                    "to_group": tgt_grp,
+                    "cross_group": cross_group,
+                    "reason": reason_str,
+                })
+                state["switch_history"] = hist[:15]
+                save_state(state)
 
-    if args.cli_switch is not None:
-        target_id = args.cli_switch
-        accounts, _, running_id = list_accounts(state)
-        if not target_id:
-            ready = [a for a in accounts if a["health"] == "ready" and not a["running"] and a["app_exists"]]
-            ready.sort(key=lambda a: (a["turns_5h"], a["turns_7d"], a["latest_mtime"]))
-            if not ready:
-                print(json.dumps({"error": "没有可用的满血账号"}, ensure_ascii=False))
+            print(json.dumps({
+                "ok": True,
+                "switched_to": target["label"],
+                "target_id": target["id"],
+                "reason": reason_str,
+                "cross_group": cross_group,
+            }, ensure_ascii=False))
+            return
+
+        # 其余纯状态修改命令：极短排他锁临界区
+        with state_lock(shared=False):
+            state = load_state()
+
+            if args.cli_add:
+                print(json.dumps(add_account(args.cli_add[0], args.cli_add[1], state), ensure_ascii=False))
                 return
-            target = ready[0]
-        else:
-            matched = [a for a in accounts if a["id"] == target_id]
-            if not matched:
-                print(json.dumps({"error": f"未找到账号 {target_id}"}, ensure_ascii=False))
-                return
-            target = matched[0]
-        generate_handoff(state.get("workspace", DEFAULT_WORKSPACE))
-        if running_id and running_id != target["id"]:
-            state.setdefault("cooldowns", {})[running_id] = time.time() + 5 * 3600
-            save_state(state)
-        switch_account_async(target["app_path"], target["label"], running_id or "main", target["id"])
-        print(json.dumps({"ok": True, "switched_to": target["label"]}, ensure_ascii=False))
-        return
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"🚀 AGY Switch 已启动: http://{args.host}:{args.port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n已停止 AGY Switch")
+            if args.cli_delete:
+                print(json.dumps(delete_account(args.cli_delete, state), ensure_ascii=False))
+                return
+
+            if args.cli_calibrate:
+                acc_id, p5, p7 = args.cli_calibrate
+                if acc_id != "main":
+                    acc_id = validate_isolated_acc_id(acc_id)
+                accounts, _, _, _ = list_accounts(state)
+                matched = [a for a in accounts if a["id"] == acc_id]
+                base_5h = matched[0]["turns_5h"] if matched else 0
+                base_7d = matched[0]["turns_7d"] if matched else 0
+                state.setdefault("calibrations", {})[acc_id] = {
+                    "pct_5h": max(0, min(100, int(float(p5)))),
+                    "pct_7d": max(0, min(100, int(float(p7)))),
+                    "base_5h": base_5h,
+                    "base_7d": base_7d,
+                    "ts": time.time(),
+                    "updated_at": datetime.now().strftime("%m-%d %H:%M"),
+                }
+                save_state(state)
+                print(json.dumps({"ok": True}, ensure_ascii=False))
+                return
+
+            if args.cli_note:
+                acc_id, note = args.cli_note
+                if acc_id != "main":
+                    acc_id = validate_isolated_acc_id(acc_id)
+                if note.strip():
+                    state.setdefault("notes", {})[acc_id] = note.strip()
+                else:
+                    state.setdefault("notes", {}).pop(acc_id, None)
+                save_state(state)
+                print(json.dumps({"ok": True}, ensure_ascii=False))
+                return
+
+            if args.cli_workspaces:
+                act, path_val = args.cli_workspaces
+                path_val = path_val.strip()
+                ws_list = list(state.get("workspaces") or [DEFAULT_WORKSPACE])
+                if act in ("add", "use"):
+                    if not os.path.isdir(path_val):
+                        raise ValueError(f"工作区目录不存在: {path_val}")
+                    if path_val not in ws_list:
+                        ws_list.append(path_val)
+                    state["workspaces"] = ws_list
+                    state["workspace"] = path_val
+                    save_state(state)
+                elif act == "remove":
+                    ws_list = [w for w in ws_list if w != path_val] or [DEFAULT_WORKSPACE]
+                    state["workspaces"] = ws_list
+                    if state.get("workspace") == path_val:
+                        state["workspace"] = ws_list[0]
+                    save_state(state)
+                print(json.dumps({"ok": True, "workspace": state["workspace"], "workspaces": state.get("workspaces", ws_list)}, ensure_ascii=False))
+                return
+
+            if args.cli_config:
+                ws, l5, l7 = args.cli_config
+                if ws and os.path.isdir(ws):
+                    state["workspace"] = ws
+                state["warn_5h_limit"] = max(10, int(float(l5)))
+                state["warn_7d_limit"] = max(50, int(float(l7)))
+                save_state(state)
+                print(json.dumps({"ok": True}, ensure_ascii=False))
+                return
+
+            if args.cli_clear_cooldowns:
+                state["cooldowns"] = {}
+                save_state(state)
+                print(json.dumps({"ok": True}, ensure_ascii=False))
+                return
+
+            if args.cli_cooldown:
+                acc_id, hours_str = args.cli_cooldown
+                if acc_id != "main":
+                    acc_id = validate_isolated_acc_id(acc_id)
+                hours = float(hours_str)
+                if hours <= 0:
+                    state.setdefault("cooldowns", {}).pop(acc_id, None)
+                else:
+                    state.setdefault("cooldowns", {})[acc_id] = time.time() + hours * 3600
+                save_state(state)
+                print(json.dumps({"ok": True}, ensure_ascii=False))
+                return
+
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
