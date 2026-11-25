@@ -8,9 +8,14 @@ final class SwitchStore: ObservableObject {
     @Published var isBusy: Bool = false
     @Published var isRefreshing: Bool = false
     @Published var autoStartEnabled: Bool = false
+    @Published var autoPasteEnabled: Bool = false
+    @Published var networkStatus: NetworkStatusInfo?
+    @Published var isProbingNetwork: Bool = false
+    @Published var blockedSwitchAlert: BlockedSwitchAlert?
     @Published var lowQuotaThreshold: Int = UserDefaults.standard.object(forKey: "agy_low_threshold") == nil ? 15 : UserDefaults.standard.integer(forKey: "agy_low_threshold")
 
     private let cliQueue = DispatchQueue(label: "io.agyswitch.cli.serial", qos: .userInitiated)
+    private let netQueue = DispatchQueue(label: "io.agyswitch.net.probe", qos: .utility)
     private var lastAlertedAccount: String = ""
     private var lastAlertTime: Date = .distantPast
     private var pollTimer: Timer?
@@ -31,6 +36,7 @@ final class SwitchStore: ObservableObject {
 
     init() {
         refresh()
+        probeNetwork(showFeedback: false)
         pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refresh(showFeedback: false)
         }
@@ -196,12 +202,54 @@ final class SwitchStore: ObservableObject {
             let nowStr = fmt.string(from: Date())
             DispatchQueue.main.async {
                 self.status = decoded
+                if let ap = decoded.auto_paste {
+                    self.autoPasteEnabled = ap
+                }
+                if self.networkStatus == nil, let cachedNet = decoded.network {
+                    self.networkStatus = cachedNet
+                }
                 self.isRefreshing = false
                 self.checkLowQuotaNotification(decoded)
                 if showFeedback {
                     self.showToast("已刷新（\(nowStr)）· 当前：\(decoded.running_id.isEmpty ? "未运行" : decoded.running_id)")
                 }
             }
+        }
+    }
+
+    /// 独立后台队列并发探测代理节点与反重力鉴权通道（零阻塞主界面与切号队列）
+    func probeNetwork(showFeedback: Bool = false) {
+        DispatchQueue.main.async { self.isProbingNetwork = true }
+        netQueue.async { [weak self] in
+            guard let self = self else { return }
+            let res = self.runCLISync(["--cli-network"])
+            guard res.exitCode == 0,
+                  let data = res.data,
+                  let decoded = try? JSONDecoder().decode(NetworkStatusInfo.self, from: data) else {
+                DispatchQueue.main.async {
+                    self.isProbingNetwork = false
+                    if showFeedback { self.showToast("节点探测失败，请检查代理软件状态") }
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                self.networkStatus = decoded
+                self.isProbingNetwork = false
+                if showFeedback {
+                    self.showToast(decoded.clean_for_antigravity
+                        ? "节点健康：\(decoded.badgeTitle) (\(decoded.exit_ip))"
+                        : "节点异常：\(decoded.error_message.isEmpty ? decoded.badgeTitle : decoded.error_message)")
+                }
+            }
+        }
+    }
+
+    func setAutoPaste(_ enabled: Bool) {
+        runMutation(
+            ["--cli-autopaste", enabled ? "on" : "off"],
+            successToast: enabled ? "已开启切号后自动粘贴（仅焦点在 Antigravity 时触发）" : "已关闭切号后自动粘贴"
+        ) { [weak self] _ in
+            self?.autoPasteEnabled = enabled
         }
     }
 
@@ -239,7 +287,7 @@ final class SwitchStore: ObservableObject {
         runMutation(["--cli-config", workspace, "\(limit5h)", "\(limit7d)"], successToast: "设置已保存")
     }
 
-    func switchTo(_ targetId: String) {
+    func switchTo(_ targetId: String, force: Bool = false) {
         guard !isBusy else { return }
         DispatchQueue.main.async {
             self.isBusy = true
@@ -247,20 +295,44 @@ final class SwitchStore: ObservableObject {
         }
         cliQueue.async { [weak self] in
             guard let self = self else { return }
-            let res = self.runCLISync(["--cli-switch", targetId])
+            var args = ["--cli-switch", targetId]
+            if force { args.append("--force") }
+            let res = self.runCLISync(args)
             guard res.exitCode == 0,
                   let data = res.data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 DispatchQueue.main.async {
                     self.isBusy = false
                     self.showToast("切换失败：后端异常退出")
+                    self.sendSafeNotification(message: "切换失败：后端异常退出", title: "AGY Switch")
                 }
                 return
             }
             if let err = obj["error"] as? String, !err.isEmpty {
+                let code = obj["code"] as? String ?? ""
+                let blockedTarget = (obj["target_id"] as? String) ?? targetId
                 DispatchQueue.main.async {
                     self.isBusy = false
                     self.showToast("切换未执行：\(err)")
+                    self.sendSafeNotification(message: err, title: "AGY Switch · 启动已拦截")
+                    if code == "NETWORK_BLOCKED" {
+                        self.probeNetwork(showFeedback: false)
+                        let hasVisibleMain = NSApp.windows.contains { !($0 is HUDWindow) && $0.isVisible }
+                        if hasVisibleMain {
+                            self.blockedSwitchAlert = BlockedSwitchAlert(targetId: blockedTarget, message: err)
+                        } else {
+                            let alert = NSAlert()
+                            alert.messageText = "代理节点异常，已拦截启动"
+                            alert.informativeText = err
+                            alert.alertStyle = .warning
+                            alert.addButton(withTitle: "取消（去切节点）")
+                            alert.addButton(withTitle: "仍要强制启动")
+                            NSApp.activate(ignoringOtherApps: true)
+                            if alert.runModal() == .alertSecondButtonReturn {
+                                self.switchTo(blockedTarget, force: true)
+                            }
+                        }
+                    }
                 }
                 return
             }

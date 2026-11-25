@@ -218,6 +218,15 @@ struct CockpitStyleAccountCard: View {
                         .background(Capsule().fill(badgeColor.opacity(0.13)))
                 }
 
+                // 真实绑定 Google 邮箱副标题（独立一行，绝不挤压主标题与徽章）
+                if !acc.displayEmail.isEmpty {
+                    Text(acc.displayEmail)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
                 // 家庭组胶囊行：主号用实心高亮胶囊，子号用轻量描边胶囊
                 HStack(spacing: 6) {
                     Button(action: { onEditNote?() }) {
@@ -479,10 +488,14 @@ struct AccountListRow: View {
                                 .background(Capsule().fill(fam.isManager ? fam.tint : fam.tint.opacity(0.13)))
                         }
                     }
-                    Text(fam.cleanNote.isEmpty ? "活跃 \(acc.latest_active)" : fam.cleanNote)
+                    let subLine = !acc.displayEmail.isEmpty
+                        ? (fam.cleanNote.isEmpty ? acc.displayEmail : "\(acc.displayEmail) · \(fam.cleanNote)")
+                        : (fam.cleanNote.isEmpty ? "活跃 \(acc.latest_active)" : fam.cleanNote)
+                    Text(subLine)
                         .font(.system(size: 10.5))
                         .foregroundColor(fam.isFlagged ? DS.brandOrange : .secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
             .frame(width: 245, alignment: .leading)
@@ -532,37 +545,70 @@ struct AccountListRow: View {
     }
 }
 
-// MARK: - 极简 HUD 悬浮切号面板 (Cockpit HUD v5.3 全键盘与即时搜索)
+// MARK: - 极简 HUD 悬浮切号面板 (Cockpit HUD v5.6 · 真·全键盘 + 即时搜索 + 零重复)
+
+final class HUDController: ObservableObject {
+    @Published var searchText: String = ""
+    @Published var selectedIndex: Int = 0
+    @Published var focusTrigger: UUID = UUID()
+
+    func resetForOpen() {
+        searchText = ""
+        selectedIndex = 0
+        focusTrigger = UUID()
+    }
+
+    func moveSelection(delta: Int, count: Int) {
+        guard count > 0 else {
+            selectedIndex = 0
+            return
+        }
+        selectedIndex = (selectedIndex + delta + count) % count
+    }
+}
 
 struct QuickSwitchHUDView: View {
     @ObservedObject var store: SwitchStore
+    @ObservedObject var hud: HUDController
     var onDismiss: () -> Void
 
-    @State private var searchText: String = ""
-    @State private var selectedIndex: Int = 0
+    @FocusState private var searchFocused: Bool
 
     private var allCandidates: [AccountInfo] {
         guard let s = store.status else { return [] }
-        return s.accounts.filter { acc in acc.logged_in && !acc.running && acc.health != "cooldown" && acc.app_exists && !acc.isFlagged }
+        return s.accounts.filter { acc in
+            acc.logged_in && !acc.running && acc.health != "cooldown" && acc.app_exists && !acc.isFlagged
+        }
     }
 
-    private var filteredCandidates: [AccountInfo] {
-        let clean = searchText.trimmingCharacters(in: .whitespaces)
+    var displayItems: [AccountInfo] {
+        let clean = hud.searchText.trimmingCharacters(in: .whitespaces)
         if clean.isEmpty {
-            return store.recommendedAccounts.isEmpty ? allCandidates : store.recommendedAccounts
+            let rec = store.recommendedAccounts
+            if !rec.isEmpty { return Array(rec.prefix(8)) }
+            return Array(allCandidates.prefix(8))
         }
         let q = clean.lowercased()
-        return allCandidates.filter { acc in
+        return Array(allCandidates.filter { acc in
             acc.label.lowercased().contains(q) ||
             acc.id.lowercased().contains(q) ||
+            acc.displayEmail.lowercased().contains(q) ||
             acc.groupLetter.lowercased().contains(q) ||
             acc.note.lowercased().contains(q)
-        }
+        }.prefix(8))
+    }
+
+    private func triggerSwitch(_ acc: AccountInfo, isTopAuto: Bool = false) {
+        onDismiss()
+        store.switchTo(isTopAuto ? "" : acc.id)
     }
 
     var body: some View {
+        let items = displayItems
+        let safeIndex = items.isEmpty ? 0 : min(max(0, hud.selectedIndex), items.count - 1)
+
         VStack(spacing: 0) {
-            // 顶栏：当前账号运行徽章 + 实时 5h 剩余比例 + Esc 说明
+            // 顶栏：当前运行账号 + 真实邮箱 + 快捷键提示
             HStack(spacing: 8) {
                 let activeId = store.status?.running_id ?? ""
                 let activeAcc = store.status?.accounts.first(where: { a in a.running })
@@ -572,51 +618,66 @@ struct QuickSwitchHUDView: View {
                     .fill(activeId.isEmpty ? Color.gray : (pct >= 60 ? DS.brandGreen : (pct >= 20 ? DS.brandOrange : Color.red)))
                     .frame(width: 8, height: 8)
 
-                let activeTag = activeAcc.map { a -> String in
-                    let g = a.groupLetter
-                    return g.isEmpty ? a.label : "\(a.label) (\(g)组\(a.isGroupManager ? "·主" : ""))"
-                } ?? (activeId.isEmpty ? "无运行实例" : activeId)
+                VStack(alignment: .leading, spacing: 1) {
+                    let activeTag = activeAcc.map { a -> String in
+                        let g = a.groupLetter
+                        return g.isEmpty ? a.label : "\(a.label) (\(g)组\(a.isGroupManager ? "·主" : ""))"
+                    } ?? (activeId.isEmpty ? "无运行实例" : activeId)
 
-                Text("当前：\(activeTag)")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.primary)
+                    Text("当前：\(activeTag)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
-                if let acc = activeAcc, acc.calibrated {
-                    Text("5h 余量 \(pct)%")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(pct >= 20 ? DS.brandBlue : .red)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    if let email = activeAcc?.displayEmail, !email.isEmpty {
+                        Text(email)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
 
-                Spacer()
+                Spacer(minLength: 6)
 
-                Text("Esc 退出 · ↩ 确认")
-                    .font(.system(size: 11))
+                Text("↑↓ 选 · ↩ 切 · ⌘1-5 · Esc")
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.06)))
+                    .lineLimit(1)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.06)))
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.vertical, 11)
             .background(Color.primary.opacity(0.03))
 
             Divider()
 
-            // 搜索输入框 (聚焦即滤)
+            // 即时搜索框（呼出自动聚焦，输入回车直切当前选中项）
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
 
-                TextField("即时搜索账号名、组别 (如 A/B/D) 或备注...", text: $searchText)
+                TextField("搜索账号、邮箱、组别 (A/B/C/D) 或备注...", text: $hud.searchText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
+                    .focused($searchFocused)
+                    .onChange(of: hud.searchText) {
+                        hud.selectedIndex = 0
+                    }
+                    .onSubmit {
+                        if !items.isEmpty {
+                            let target = items[safeIndex]
+                            let isTopAuto = hud.searchText.trimmingCharacters(in: .whitespaces).isEmpty && safeIndex == 0
+                            triggerSwitch(target, isTopAuto: isTopAuto)
+                        }
+                    }
 
-                if !searchText.isEmpty {
-                    Button(action: { searchText = "" }) {
+                if !hud.searchText.isEmpty {
+                    Button(action: { hud.searchText = "" }) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
@@ -630,66 +691,7 @@ struct QuickSwitchHUDView: View {
 
             Divider()
 
-            // 黄金接力横幅（仅在搜索为空时常驻推荐）
-            if searchText.isEmpty, let top = store.topRecommendedAccount {
-                let topFam = FamilyVisual.from(top)
-                Button(action: {
-                    onDismiss()
-                    store.switchTo("")
-                }) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            Circle()
-                                .fill(LinearGradient(colors: [DS.brandBlue, Color.indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 34, height: 34)
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundColor(.white)
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text("⚡ 一键接力")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundColor(DS.brandBlue)
-                                Text(top.label)
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundColor(.primary)
-                                if topFam.isManager {
-                                    Image(systemName: "crown.fill")
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.orange)
-                                }
-                            }
-                            Text(top.recommendTag.isEmpty ? "跨组满血候选" : top.recommendTag)
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-
-                        Spacer()
-
-                        Text("跨组首选")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(DS.brandBlue))
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(DS.brandBlue.opacity(0.08)))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9)
-                            .stroke(DS.brandBlue.opacity(0.35), lineWidth: 1.2)
-                    )
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-            }
-
-            // 候选账号滚动列表 (带数字 1~6 快捷键与高亮)
-            let items = filteredCandidates
+            // 合并候选列表（第 0 项即为跨组首选黄金高亮，消除重复卡片）
             if items.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "tray")
@@ -699,76 +701,128 @@ struct QuickSwitchHUDView: View {
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 28)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.vertical, 36)
             } else {
-                ScrollView {
-                    VStack(spacing: 5) {
-                        ForEach(Array(items.prefix(7).enumerated()), id: \.element.id) { index, acc in
-                            let fam = FamilyVisual.from(acc)
-                            Button(action: {
-                                onDismiss()
-                                store.switchTo(acc.id)
-                            }) {
-                                HStack(spacing: 8) {
-                                    if index < 5 && searchText.isEmpty {
-                                        Text("\(index + 1)")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.secondary)
-                                            .frame(width: 16, height: 16)
-                                            .background(Circle().fill(Color.primary.opacity(0.08)))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 6) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { index, acc in
+                                let fam = FamilyVisual.from(acc)
+                                let isSelected = (index == safeIndex)
+                                let isTopHero = (index == 0 && hud.searchText.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                                Button(action: {
+                                    triggerSwitch(acc, isTopAuto: isTopHero)
+                                }) {
+                                    HStack(spacing: 10) {
+                                        if isTopHero {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(LinearGradient(colors: [DS.brandBlue, Color.indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                                    .frame(width: 28, height: 28)
+                                                Image(systemName: "bolt.fill")
+                                                    .font(.system(size: 12, weight: .bold))
+                                                    .foregroundColor(.white)
+                                            }
+                                        } else {
+                                            Text(index < 5 ? "⌘\(index + 1)" : "·")
+                                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                                .foregroundColor(isSelected ? DS.brandBlue : .secondary)
+                                                .frame(width: 26, height: 20)
+                                                .background(RoundedRectangle(cornerRadius: 5).fill(isSelected ? DS.brandBlue.opacity(0.14) : Color.primary.opacity(0.06)))
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack(spacing: 5) {
+                                                Circle().fill(fam.tint).frame(width: 7, height: 7)
+                                                Text(acc.label)
+                                                    .font(.system(size: isTopHero ? 13 : 12.5, weight: isTopHero || isSelected ? .bold : .medium))
+                                                    .foregroundColor(.primary)
+                                                    .lineLimit(1)
+                                                if fam.isManager {
+                                                    Image(systemName: "crown.fill")
+                                                        .font(.system(size: 9.5))
+                                                        .foregroundColor(.orange)
+                                                }
+                                                if !fam.shortBadge.isEmpty {
+                                                    Text(fam.shortBadge)
+                                                        .font(.system(size: 9.5, weight: .semibold))
+                                                        .foregroundColor(fam.tint)
+                                                        .padding(.horizontal, 5)
+                                                        .padding(.vertical, 1)
+                                                        .background(Capsule().fill(fam.tint.opacity(0.13)))
+                                                }
+                                                if isTopHero {
+                                                    Text("跨组首选")
+                                                        .font(.system(size: 9.5, weight: .bold))
+                                                        .foregroundColor(.white)
+                                                        .padding(.horizontal, 6)
+                                                        .padding(.vertical, 1.5)
+                                                        .background(Capsule().fill(DS.brandBlue))
+                                                }
+                                            }
+
+                                            let subtitle = !acc.displayEmail.isEmpty
+                                                ? acc.displayEmail
+                                                : (acc.recommendTag.isEmpty ? fam.cleanNote : acc.recommendTag)
+                                            if !subtitle.isEmpty {
+                                                Text(subtitle)
+                                                    .font(.system(size: 10.5, design: !acc.displayEmail.isEmpty ? .monospaced : .default))
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                            }
+                                        }
+
+                                        Spacer(minLength: 6)
+
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            Text("5h \(acc.turns_5h)轮")
+                                                .font(.system(size: 10.5, weight: .medium))
+                                                .foregroundColor(acc.turns_5h == 0 ? DS.brandGreen : .secondary)
+                                            if isSelected {
+                                                Text("↩ 接力")
+                                                    .font(.system(size: 9.5, weight: .bold))
+                                                    .foregroundColor(DS.brandBlue)
+                                            }
+                                        }
                                     }
-
-                                    Circle()
-                                        .fill(fam.tint)
-                                        .frame(width: 7, height: 7)
-
-                                    Text(acc.label)
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundColor(.primary)
-
-                                    if fam.isManager {
-                                        Text("主")
-                                            .font(.system(size: 9, weight: .bold))
-                                            .foregroundColor(fam.tint)
-                                            .padding(.horizontal, 4)
-                                            .padding(.vertical, 1)
-                                            .background(Capsule().fill(fam.tint.opacity(0.14)))
-                                    }
-
-                                    if !fam.shortBadge.isEmpty {
-                                        Text(fam.shortBadge)
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary)
-                                    }
-
-                                    Spacer()
-
-                                    Text("5h: \(acc.turns_5h)轮")
-                                        .font(.system(size: 11))
-                                        .foregroundColor(.secondary)
-
-                                    Image(systemName: "arrow.right.circle.fill")
-                                        .font(.system(size: 13))
-                                        .foregroundColor(DS.brandBlue.opacity(0.8))
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, isTopHero ? 9 : 7)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .fill(isSelected ? DS.brandBlue.opacity(0.11) : (isTopHero ? DS.brandBlue.opacity(0.05) : Color.primary.opacity(0.03)))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .stroke(isSelected ? DS.brandBlue.opacity(0.6) : (isTopHero ? DS.brandBlue.opacity(0.25) : Color.clear), lineWidth: isSelected ? 1.4 : 1)
+                                    )
                                 }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+                                .buttonStyle(.plain)
+                                .id(acc.id)
+                                .onHover { hovering in
+                                    if hovering { hud.selectedIndex = index }
+                                }
                             }
-                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .onChange(of: hud.selectedIndex) {
+                        if !items.isEmpty {
+                            withAnimation(.easeOut(duration: 0.1)) {
+                                proxy.scrollTo(items[safeIndex].id, anchor: .center)
+                            }
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
                 }
-                .frame(maxHeight: 210)
             }
 
             Divider()
 
-            // 底部操作与工作区指示
-            HStack(spacing: 12) {
+            // 底部操作栏：复制接力词 + 3TB 状态 + 可点击重测的节点哨兵 + 完整控制台
+            HStack(spacing: 8) {
                 Button(action: {
                     onDismiss()
                     store.saveHandoff(transcript: "", note: "")
@@ -778,34 +832,36 @@ struct QuickSwitchHUDView: View {
                 }
                 .buttonStyle(.plain)
 
-                // 3TB SSOT 在线感知徽章
                 let tbOnline = store.status?.tb3_online ?? false
                 HStack(spacing: 4) {
                     Circle()
                         .fill(tbOnline ? DS.brandGreen : Color.secondary.opacity(0.4))
                         .frame(width: 6, height: 6)
-                    Text(tbOnline ? "3TB 在线" : "3TB 离线")
+                    Text(tbOnline ? "3TB" : "3TB离线")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(tbOnline ? DS.brandGreen : .secondary)
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Capsule().fill(Color.primary.opacity(0.04)))
+                .background(Capsule().fill(Color.primary.opacity(0.05)))
 
-                // 网络与节点健康徽章 (反重力专属哨兵)
-                if let net = store.status?.network {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(net.clean_for_antigravity ? DS.brandGreen : Color.red)
-                            .frame(width: 6, height: 6)
-                        Text(net.clean_for_antigravity ? "🌐 \(net.country) · \(net.latency_ms)ms" : "⚠️ 节点不可用")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(net.clean_for_antigravity ? DS.brandGreen : .red)
+                if let net = store.networkStatus ?? store.status?.network {
+                    Button(action: { store.probeNetwork(showFeedback: true) }) {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(net.clean_for_antigravity ? DS.brandGreen : Color.red)
+                                .frame(width: 6, height: 6)
+                            Text(store.isProbingNetwork ? "测活中..." : net.badgeTitle)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(net.clean_for_antigravity ? DS.brandGreen : .red)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(net.clean_for_antigravity ? Color.green.opacity(0.08) : Color.red.opacity(0.12)))
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(net.clean_for_antigravity ? Color.green.opacity(0.08) : Color.red.opacity(0.12)))
-                    .help(net.clean_for_antigravity ? "出口: \(net.exit_ip) (\(net.region)) · 鉴权通道正常" : (net.error_message.isEmpty ? "当前节点处于不可用地区，请切美/日节点" : net.error_message))
+                    .buttonStyle(.plain)
+                    .help(net.helpDetail)
                 }
 
                 Spacer()
@@ -815,17 +871,17 @@ struct QuickSwitchHUDView: View {
                     NSApp.activate(ignoringOtherApps: true)
                     NSApp.windows.first(where: { w in !(w is HUDWindow) })?.makeKeyAndOrderFront(nil)
                 }) {
-                    Text("完整控制台 ↗")
+                    Text("控制台 ↗")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(DS.brandBlue)
                 }
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.vertical, 9)
             .background(Color.primary.opacity(0.02))
         }
-        .frame(width: 460)
+        .frame(width: 460, height: 430)
         .background(
             RoundedRectangle(cornerRadius: 14)
                 .fill(.ultraThinMaterial)
@@ -836,6 +892,15 @@ struct QuickSwitchHUDView: View {
                 .stroke(Color.white.opacity(0.22), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                searchFocused = true
+            }
+        }
+        .onChange(of: hud.focusTrigger) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                searchFocused = true
+            }
+        }
     }
 }
-

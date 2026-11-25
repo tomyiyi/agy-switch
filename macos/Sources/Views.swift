@@ -41,6 +41,49 @@ struct DashboardView: View {
 
                     Spacer()
 
+                    // 反重力代理节点哨兵胶囊（点击可立即重测）
+                    if let net = store.networkStatus ?? store.status?.network {
+                        Button(action: { store.probeNetwork(showFeedback: true) }) {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(net.clean_for_antigravity ? DS.brandGreen : DS.brandRed)
+                                    .frame(width: 6.5, height: 6.5)
+                                Text(store.isProbingNetwork ? "测活中..." : net.badgeTitle)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(net.clean_for_antigravity ? DS.brandGreen : DS.brandRed)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(net.clean_for_antigravity ? DS.brandGreen.opacity(0.1) : DS.brandRed.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        .help(net.helpDetail)
+                    } else {
+                        Button(action: { store.probeNetwork(showFeedback: true) }) {
+                            Text(store.isProbingNetwork ? "节点测活中..." : "🌐 检测节点")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    // 3TB 中心仓在线感知胶囊
+                    let tbOnline = store.status?.tb3_online ?? false
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(tbOnline ? DS.brandGreen : Color.secondary.opacity(0.45))
+                            .frame(width: 6, height: 6)
+                        Text(tbOnline ? "3TB 在线" : "3TB 离线")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(tbOnline ? DS.brandGreen : .secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.primary.opacity(0.04)))
+                    .help(tbOnline ? "3TB 知识库母本已挂载，交接单自动原子镜像" : "3TB 未挂载，仅本地保存交接单")
+
+                    Divider().frame(height: 12)
+
                     let wsList = store.status?.workspaces ?? []
                     let curWs = store.status?.workspace ?? ""
                     if wsList.count > 1 {
@@ -132,9 +175,19 @@ struct DashboardView: View {
                                     }
                                 }
                             }
-                            Text("当前接力工作区：\(store.status?.workspace ?? "-")")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
+                            HStack(spacing: 10) {
+                                if let email = activeAcc?.displayEmail, !email.isEmpty {
+                                    Label(email, systemImage: "envelope.fill")
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .foregroundColor(DS.brandBlue)
+                                        .lineLimit(1)
+                                }
+                                Text("当前接力工作区：\(store.status?.workspace ?? "-")")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
                         }
 
                         Spacer()
@@ -873,10 +926,14 @@ struct SettingsView: View {
                 Stepper("7 天周参考：\(limit7d) 轮", value: $limit7d, in: 100...3000, step: 50)
             }
 
-            Section("系统集成") {
+            Section("系统集成与自动化") {
                 Toggle("登录 macOS 时自动启动 AGY Switch", isOn: Binding(
                     get: { store.autoStartEnabled },
                     set: { store.setAutoStart($0) }
+                ))
+                Toggle("切号后自动粘贴接力词（仅焦点确为 Antigravity 时触发）", isOn: Binding(
+                    get: { store.autoPasteEnabled },
+                    set: { store.setAutoPaste($0) }
                 ))
             }
 

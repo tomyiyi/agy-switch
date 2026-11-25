@@ -1,4 +1,5 @@
 import Cocoa
+import Combine
 import SwiftUI
 import Carbon
 
@@ -12,7 +13,7 @@ final class GlobalHotKeyManager {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(
             GetApplicationEventTarget(),
-            { (nextHandler, theEvent, userData) -> OSStatus in
+            { (_, _, _) -> OSStatus in
                 DispatchQueue.main.async {
                     GlobalHotKeyManager.shared.onTrigger?()
                 }
@@ -43,8 +44,12 @@ final class GlobalHotKeyManager {
     }
 }
 
-// MARK: - HUD 悬浮窗口
+// MARK: - HUD 悬浮窗口（支持焦点在搜索框时响应 ↑/↓/⌘1-5/Esc）
 final class HUDWindow: NSPanel {
+    var onMoveSelection: ((Int) -> Void)?
+    var onQuickNumber: ((Int) -> Void)?
+    var onEscape: (() -> Void)?
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -60,12 +65,37 @@ final class HUDWindow: NSPanel {
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     }
 
-    override var canBecomeKey: Bool {
-        return true
-    }
+    override var canBecomeKey: Bool { true }
 
     override func cancelOperation(_ sender: Any?) {
+        onEscape?()
         self.orderOut(sender)
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown {
+            let code = event.keyCode
+            if code == 53 { // Esc
+                onEscape?()
+                self.orderOut(nil)
+                return
+            }
+            if code == 126 { // Up Arrow
+                onMoveSelection?(-1)
+                return
+            }
+            if code == 125 { // Down Arrow
+                onMoveSelection?(1)
+                return
+            }
+            if event.modifierFlags.contains(.command),
+               let chars = event.charactersIgnoringModifiers,
+               let num = Int(chars), (1...5).contains(num) {
+                onQuickNumber?(num - 1)
+                return
+            }
+        }
+        super.sendEvent(event)
     }
 }
 
@@ -129,6 +159,16 @@ struct MainRootView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 630)
+        .alert(item: $store.blockedSwitchAlert) { alertItem in
+            Alert(
+                title: Text("代理节点异常，已拦截启动"),
+                message: Text(alertItem.message),
+                primaryButton: .destructive(Text("仍要强制启动")) {
+                    store.switchTo(alertItem.targetId, force: true)
+                },
+                secondaryButton: .cancel(Text("取消（去切节点）"))
+            )
+        }
     }
 }
 
@@ -136,22 +176,27 @@ struct MainRootView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var window: NSWindow!
     private var hudWindow: HUDWindow?
+    private let hudController = HUDController()
     private var statusItem: NSStatusItem!
     private let statusMenu = NSMenu()
     private let store = SwitchStore()
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeManager.applySavedTheme()
 
-        // 1. 初始化顶部状态栏图标与动态指示器
+        // 1. 初始化顶部状态栏图标，并通过 Combine 实时订阅状态变化（零延迟）
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "⚡"
         statusMenu.delegate = self
         statusItem.menu = statusMenu
 
-        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            self?.updateStatusIndicator()
-        }
+        store.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateStatusIndicator()
+            }
+            .store(in: &cancellables)
         updateStatusIndicator()
 
         // 2. 初始化主窗口
@@ -169,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // 3. 初始化极简 HUD 切号面板
+        // 3. 初始化极简 HUD 切号面板（与视图尺寸 460×430 严格一致）
         setupHUDWindow()
 
         // 4. 注册全局快捷键 ⌃⌥A (Control + Option + A)
@@ -179,12 +224,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         GlobalHotKeyManager.shared.register(keyCode: 0, modifiers: UInt32(controlKey | optionKey))
     }
 
+    private func hudCurrentItems() -> [AccountInfo] {
+        guard let s = store.status else { return [] }
+        let all = s.accounts.filter { $0.logged_in && !$0.running && $0.health != "cooldown" && $0.app_exists && !$0.isFlagged }
+        let clean = hudController.searchText.trimmingCharacters(in: .whitespaces)
+        if clean.isEmpty {
+            let rec = store.recommendedAccounts
+            return Array((rec.isEmpty ? all : rec).prefix(8))
+        }
+        let q = clean.lowercased()
+        return Array(all.filter {
+            $0.label.lowercased().contains(q) ||
+            $0.id.lowercased().contains(q) ||
+            $0.displayEmail.lowercased().contains(q) ||
+            $0.groupLetter.lowercased().contains(q) ||
+            $0.note.lowercased().contains(q)
+        }.prefix(8))
+    }
+
     private func setupHUDWindow() {
-        let hudView = QuickSwitchHUDView(store: store, onDismiss: { [weak self] in
+        let hudView = QuickSwitchHUDView(store: store, hud: hudController, onDismiss: { [weak self] in
             self?.hudWindow?.orderOut(nil)
         })
-        let panel = HUDWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 320))
+        let panel = HUDWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 430))
         panel.contentView = NSHostingView(rootView: hudView)
+        panel.onMoveSelection = { [weak self] delta in
+            guard let self = self else { return }
+            let count = self.hudCurrentItems().count
+            self.hudController.moveSelection(delta: delta, count: count)
+        }
+        panel.onQuickNumber = { [weak self] idx in
+            guard let self = self else { return }
+            let items = self.hudCurrentItems()
+            guard idx >= 0 && idx < items.count else { return }
+            self.hudWindow?.orderOut(nil)
+            let isTopAuto = self.hudController.searchText.trimmingCharacters(in: .whitespaces).isEmpty && idx == 0
+            self.store.switchTo(isTopAuto ? "" : items[idx].id)
+        }
         self.hudWindow = panel
     }
 
@@ -193,14 +269,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if panel.isVisible {
             panel.orderOut(nil)
         } else {
+            hudController.resetForOpen()
             store.refresh(showFeedback: false)
+            store.probeNetwork(showFeedback: false)
             panel.center()
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
 
-    // 每次点开顶部 ⚡ 菜单时动态构建最新账号池快照
     private func updateStatusIndicator() {
         guard let button = statusItem.button else { return }
         let runningId = store.status?.running_id ?? ""
@@ -209,21 +286,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        let pct = activeAcc.remain_5h_pct
-        let icon: String
-        if pct >= 60 {
-            icon = "🟢"
-        } else if pct >= 20 {
-            icon = "🟡"
-        } else {
-            icon = "🔴"
-        }
-
         let grp = activeAcc.groupLetter
         let tag = grp.isEmpty ? "" : " · \(grp)组"
-        button.title = "\(icon) ⚡ \(pct)%\(tag)"
+        if activeAcc.calibrated {
+            let pct = activeAcc.remain_5h_pct
+            let icon = pct >= 60 ? "🟢" : (pct >= 20 ? "🟡" : "🔴")
+            button.title = "\(icon) ⚡ \(pct)%\(tag)"
+        } else {
+            let turns = activeAcc.turns_5h
+            let icon = turns < 100 ? "🟢" : (turns < 160 ? "🟡" : "🔴")
+            button.title = "\(icon) ⚡ \(turns)轮\(tag)"
+        }
     }
 
+    // 每次点开顶部 ⚡ 菜单时动态构建最新账号池快照
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
 
@@ -231,7 +307,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let activeAcc = store.status?.accounts.first(where: { $0.running })
         let activeTag = activeAcc.map { a -> String in
             let g = a.groupLetter
-            return g.isEmpty ? a.label : "\(a.label) (\(g)组)"
+            let base = g.isEmpty ? a.label : "\(a.label) (\(g)组)"
+            return a.displayEmail.isEmpty ? base : "\(base) · \(a.displayEmail)"
         } ?? (activeId.isEmpty ? "无运行实例" : activeId)
 
         let headerItem = NSMenuItem(title: "当前运行：\(activeTag)", action: nil, keyEquivalent: "")
@@ -256,6 +333,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hudItem = NSMenuItem(title: "呼出极简切号浮窗 (⌃⌥A)", action: #selector(toggleHUD), keyEquivalent: "")
         hudItem.target = self
         menu.addItem(hudItem)
+
+        if let net = store.networkStatus ?? store.status?.network {
+            let netItem = NSMenuItem(title: "节点状态：\(net.badgeTitle)（点击重测）", action: #selector(menuProbeNetwork), keyEquivalent: "")
+            netItem.target = self
+            menu.addItem(netItem)
+        }
 
         menu.addItem(NSMenuItem.separator())
 
@@ -312,8 +395,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         store.saveHandoff(transcript: "", note: "")
     }
 
+    @objc private func menuProbeNetwork() {
+        store.probeNetwork(showFeedback: true)
+    }
+
     @objc private func menuRefresh() {
         store.refresh(showFeedback: true)
+        store.probeNetwork(showFeedback: false)
     }
 
     @objc private func showMainWindow() {

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-AGY Switch v5.0 — Antigravity 原生多账号池管理与跨家庭组智能接力引擎
+AGY Switch v5.6 — Antigravity 原生多账号池管理与跨家庭组智能接力引擎
 零第三方依赖，仅使用 Python 3 标准库，严格遵守本地只读安全边界（绝不触碰私有 OAuth Token API）。
 """
 
 import argparse
+import concurrent.futures
 import contextlib
 import fcntl
 import glob
@@ -15,6 +16,7 @@ import signal
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -22,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-APP_VERSION = "5.5.0"
+APP_VERSION = "5.6.0"
 
 _raw_home = str(Path.home())
 HOME = (
@@ -35,6 +37,8 @@ APP_DIR = HOME / "Desktop" / "Antigravity多开管理"
 STATE_DIR = HOME / ".agy-switch"
 STATE_FILE = STATE_DIR / "state.json"
 LOCK_FILE = STATE_DIR / "state.lock"
+NET_CACHE_FILE = STATE_DIR / "network_cache.json"
+NET_CACHE_TTL = 60.0
 DEFAULT_WORKSPACE = str(HOME / "Desktop" / "workspace")
 RELAY_PROMPT = "请先阅读 HANDOFF_AUTO.md，接力继续刚才未完成的工作。"
 WARN_5H_LIMIT = 200
@@ -80,6 +84,7 @@ def load_state() -> dict:
         "warn_7d_limit": WARN_7D_LIMIT,
         "last_switch": "",
         "switch_history": [],
+        "auto_paste": False,
     }
     if STATE_FILE.exists():
         try:
@@ -105,6 +110,8 @@ def load_state() -> dict:
                     base["last_switch"] = loaded["last_switch"]
                 if isinstance(loaded.get("switch_history"), list):
                     base["switch_history"] = [x for x in loaded["switch_history"] if isinstance(x, dict)]
+                if isinstance(loaded.get("auto_paste"), bool):
+                    base["auto_paste"] = loaded["auto_paste"]
         except Exception:
             pass
     return base
@@ -258,14 +265,36 @@ def scan_account_metrics(gemini_dir: Path):
     }
 
 
+def _infer_active_group(accounts: list, active_acc: Optional[dict]) -> str:
+    """推导当前运行账号的家庭组：优先使用手动标注；若未标注（如 main），按真实邮箱/前缀自动关联已有同组账号防碰撞。"""
+    if not active_acc:
+        return ""
+    if active_acc.get("family_group"):
+        return active_acc["family_group"]
+    active_email = (active_acc.get("email") or "").strip().lower()
+    if not active_email:
+        return ""
+    active_prefix = active_email.split("@")[0]
+    for a in accounts:
+        if a["id"] == active_acc["id"] or not a.get("family_group"):
+            continue
+        other_email = (a.get("email") or "").strip().lower()
+        if other_email and other_email == active_email:
+            return a["family_group"]
+        if len(active_prefix) >= 5 and active_prefix in a["id"].lower():
+            return a["family_group"]
+    return ""
+
+
 def pick_best_candidates(accounts: list, running_id: str) -> list:
     """
     跨家庭组智能选号排序引擎：
-    优先级：1. 排除同家庭组  2. 独享组优先  3. 近 5h 轮数最少  4. 近 7d 轮数最少  5. 最久未活跃
-    自动跳过未登录、冷却中、启动器缺失、当前运行中及带风控/二次验证标记的账号。
+    优先级：1. 排除同家庭组（含同邮箱自动关联）  2. 独享组优先  3. 近 5h 轮数最少  4. 近 7d 轮数最少  5. 最久未活跃
+    自动跳过未登录、冷却中、启动器缺失、当前运行中、同邮箱重复实例及带风控/二次验证标记的账号。
     """
     active_acc = next((a for a in accounts if a["id"] == running_id), None)
-    active_grp = active_acc["family_group"] if active_acc else ""
+    active_grp = _infer_active_group(accounts, active_acc)
+    active_email = (active_acc.get("email") or "").strip().lower() if active_acc else ""
 
     eligible = [
         a for a in accounts
@@ -274,6 +303,7 @@ def pick_best_candidates(accounts: list, running_id: str) -> list:
         and a["app_exists"]
         and not a["running"]
         and not a["flagged"]
+        and not (active_email and (a.get("email") or "").strip().lower() == active_email)
     ]
 
     def sort_key(a: dict):
@@ -326,8 +356,7 @@ def list_accounts(state: dict):
 
     main_metrics = scan_account_metrics(HOME / ".gemini")
     main_email = get_instance_real_email("main")
-    main_disp = f"主账号 ({main_email})" if main_email else "主账号 (~/.gemini)"
-    candidates = [("main", main_disp, "/Applications/Antigravity.app", main_metrics)]
+    candidates = [("main", "主账号 (~/.gemini)", "/Applications/Antigravity.app", main_metrics, main_email)]
 
     if MULTI_DIR.exists():
         dirs = [d for d in MULTI_DIR.iterdir() if d.is_dir()]
@@ -337,12 +366,11 @@ def list_accounts(state: dict):
             app_path = str(APP_DIR / f"Antigravity-{acc_id}.app")
             metrics = scan_account_metrics(d / ".gemini")
             real_email = get_instance_real_email(acc_id)
-            disp_label = f"{acc_id} ({real_email})" if real_email and real_email not in acc_id else acc_id
-            candidates.append((acc_id, disp_label, app_path, metrics))
+            candidates.append((acc_id, acc_id, app_path, metrics, real_email))
 
     # 收集去重后的最近会话（优先挂在当前运行账号名下，避免软链 brain 重复展示同一会话）
     ordered_for_sessions = sorted(candidates, key=lambda c: 0 if c[0] == running_id else 1)
-    for acc_id, label, _, metrics in ordered_for_sessions:
+    for acc_id, label, _, metrics, _ in ordered_for_sessions:
         for s in metrics["sessions"]:
             rp = s.get("real_path", s["path"])
             if rp in seen_real_sessions:
@@ -355,14 +383,14 @@ def list_accounts(state: dict):
 
     group_counts = {}
     parsed_notes = {}
-    for acc_id, _, _, _ in candidates:
+    for acc_id, _, _, _, _ in candidates:
         meta = parse_family_meta(notes.get(acc_id, ""))
         parsed_notes[acc_id] = meta
         grp = meta["family_group"]
         if grp:
             group_counts[grp] = group_counts.get(grp, 0) + 1
 
-    for acc_id, label, app_path, metrics in candidates:
+    for acc_id, label, app_path, metrics, real_email in candidates:
         cd_until = float(cooldowns.get(acc_id, 0) or 0)
         in_cooldown = cd_until > now
         remaining_min = int((cd_until - now) / 60) + 1 if in_cooldown else 0
@@ -412,6 +440,7 @@ def list_accounts(state: dict):
         accounts.append({
             "id": acc_id,
             "label": label,
+            "email": real_email,
             "note": notes.get(acc_id, ""),
             "family_group": grp,
             "is_manager": meta["is_manager"],
@@ -458,17 +487,47 @@ def list_accounts(state: dict):
 
 
 
-def detect_3tb_brain_dir() -> Optional[Path]:
-    """探测本地挂载的黑苹果 3TB 知识库中心仓 (SSOT)"""
-    for cand in [Path("/Volumes/100.124.49.41"), Path("/Volumes/3TB_DATA"), Path("/Volumes/E")]:
-        target = cand / "02-知识库" / "tom-brain-2026"
-        if target.exists():
-            return target
-    return None
+def _atomic_write_text(target: Path, content: str) -> None:
+    """临时文件 + os.replace 原子写入，防止 SMB/磁盘断流写坏目标文件。"""
+    tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def detect_3tb_brain_dir(timeout_sec: float = 0.8) -> Optional[Path]:
+    """探测本地挂载的黑苹果 3TB 知识库中心仓 (SSOT)，带超时保护防止 stale SMB 假死。"""
+    vol_root = Path("/Volumes")
+    try:
+        mounted_names = set(os.listdir(vol_root)) if vol_root.exists() else set()
+    except Exception:
+        return None
+    candidates = [vol_root / name for name in ("100.124.49.41", "3TB_DATA", "E") if name in mounted_names]
+    if not candidates:
+        return None
+
+    def _probe() -> Optional[Path]:
+        for cand in candidates:
+            target = cand / "02-知识库" / "tom-brain-2026"
+            try:
+                if target.exists():
+                    return target
+            except Exception:
+                continue
+        return None
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(_probe)
+    try:
+        res = fut.result(timeout=timeout_sec)
+        ex.shutdown(wait=False)
+        return res
+    except Exception:
+        ex.shutdown(wait=False)
+        return None
 
 
 def sync_handoff_to_3tb(content: str, filename: str = "HANDOFF_AUTO.md") -> Optional[str]:
-    """安全镜像交接单至 3TB 母本，实现跨机器无缝上下文共享"""
+    """安全原子镜像交接单至 3TB 母本，实现跨机器无缝上下文共享"""
     brain = detect_3tb_brain_dir()
     if not brain:
         return None
@@ -476,9 +535,9 @@ def sync_handoff_to_3tb(content: str, filename: str = "HANDOFF_AUTO.md") -> Opti
         dest_dir = brain / "06-Codex对话" / "AGY_Handoff"
         dest_dir.mkdir(parents=True, exist_ok=True)
         target = dest_dir / filename
-        target.write_text(content, encoding="utf-8")
+        _atomic_write_text(target, content)
         latest = dest_dir / "HANDOFF_LATEST.md"
-        latest.write_text(content, encoding="utf-8")
+        _atomic_write_text(latest, content)
         return str(target)
     except Exception:
         return None
@@ -832,15 +891,39 @@ def unify_shared_assets() -> dict:
 
 
 
-def probe_network_quality() -> dict:
+def read_cached_network_status(max_age_sec: float = NET_CACHE_TTL) -> Optional[dict]:
+    """零阻塞读取最近一次网络哨兵缓存（--cli-status 专用，绝不在主刷新路径做公网 I/O）。"""
+    if not NET_CACHE_FILE.exists():
+        return None
+    try:
+        data = json.loads(NET_CACHE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        ts = float(data.get("checked_ts", 0) or 0)
+        if max_age_sec > 0 and (time.time() - ts) > max_age_sec:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _save_network_cache(payload: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(NET_CACHE_FILE, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def probe_network_quality(save_cache: bool = True) -> dict:
     """
-    毫秒级探测当前代理与出口网络质量（严格 2.5 秒总超时）：
-    1. 测出口 IP 与国家/地区（避开 HK 等受限区）；
-    2. 测 antigravity.google 官方鉴权端点；
-    3. 测 accounts.google.com 登录通行证。
+    并发探测当前代理与出口网络质量（3 路并发，单路超时 2s，总耗时通常 < 0.8s）：
+    1. 测 antigravity.google 官方鉴权端点；
+    2. 测 accounts.google.com 登录通行证；
+    3. 测出口 IP 与国家/地区（避开 HK/CN/RU/IR 等受限区，并容错 ipinfo.io 限流）。
     """
     result = {
-        "ok": True,
+        "ok": False,
         "exit_ip": "",
         "country": "",
         "region": "",
@@ -849,45 +932,73 @@ def probe_network_quality() -> dict:
         "antigravity_ok": False,
         "auth_ok": False,
         "clean_for_antigravity": False,
-        "error_message": ""
+        "error_message": "",
+        "checked_ts": time.time(),
     }
-    # 1. 测反重力鉴权通道
-    try:
+
+    def _check_ag():
         t0 = time.time()
         req = urllib.request.Request("https://antigravity.google/favicon.svg", headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=2.0) as resp:
-            result["antigravity_ok"] = (resp.status == 200)
-            result["latency_ms"] = int((time.time() - t0) * 1000)
-    except Exception as e:
-        result["error_message"] = f"反重力鉴权连接失败: {e}"
+            return resp.status == 200, int((time.time() - t0) * 1000)
 
-    # 2. 测 Google 登录通行证
-    try:
+    def _check_auth():
         req = urllib.request.Request("https://accounts.google.com/generate_204", headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=2.0) as resp:
-            result["auth_ok"] = (resp.status == 204)
-    except Exception:
-        pass
+            return resp.status == 204
 
-    # 3. 查出口地区
-    try:
+    def _check_ip():
         req = urllib.request.Request("https://ipinfo.io/json", headers={"User-Agent": "curl/7.68.0"})
         with urllib.request.urlopen(req, timeout=2.0) as resp:
-            ip_data = json.loads(resp.read().decode())
-            result["exit_ip"] = ip_data.get("ip", "")
-            result["country"] = ip_data.get("country", "")
-            result["region"] = f"{ip_data.get('city', '')}, {ip_data.get('region', '')}".strip(", ")
-            result["org"] = ip_data.get("org", "")
-    except Exception:
-        pass
+            return json.loads(resp.read().decode())
 
-    # 综合研判
-    is_supported_region = (result["country"] not in ["HK", "CN", "RU", "IR"])
-    result["clean_for_antigravity"] = bool(result["antigravity_ok"] and result["auth_ok"] and is_supported_region)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        f_ag = ex.submit(_check_ag)
+        f_auth = ex.submit(_check_auth)
+        f_ip = ex.submit(_check_ip)
+
+        try:
+            ag_ok, lat = f_ag.result(timeout=2.5)
+            result["antigravity_ok"] = ag_ok
+            result["latency_ms"] = lat
+        except Exception as e:
+            result["error_message"] = f"反重力鉴权连接失败: {e}"
+
+        try:
+            result["auth_ok"] = bool(f_auth.result(timeout=2.5))
+        except Exception as e:
+            if not result["error_message"]:
+                result["error_message"] = f"Google 登录通道不可达: {e}"
+
+        try:
+            ip_data = f_ip.result(timeout=2.5)
+            if isinstance(ip_data, dict):
+                result["exit_ip"] = str(ip_data.get("ip", "") or "")
+                result["country"] = str(ip_data.get("country", "") or "").upper()
+                result["region"] = f"{ip_data.get('city', '')}, {ip_data.get('region', '')}".strip(", ")
+                result["org"] = str(ip_data.get("org", "") or "")
+        except Exception:
+            pass
+
+    blocked_regions = {"HK", "CN", "RU", "IR"}
+    is_blocked = result["country"] in blocked_regions
+    if is_blocked and not result["error_message"]:
+        result["error_message"] = f"当前出口地区 ({result['country']}) 不支持 Antigravity，请切换美/日/台/新节点"
+    result["ok"] = bool(result["antigravity_ok"] or result["auth_ok"])
+    result["clean_for_antigravity"] = bool(result["antigravity_ok"] and result["auth_ok"] and not is_blocked)
+    if save_cache:
+        _save_network_cache(result)
     return result
 
 
-def perform_switch(target_app: str, target_label: str, source_id: str = "", target_id: str = "") -> None:
+def perform_switch(
+    target_app: str,
+    target_label: str,
+    source_id: str = "",
+    target_id: str = "",
+    auto_paste: bool = False,
+    is_login: bool = False,
+) -> None:
     """
     安全切号编排（在 state_lock 之外运行，不阻塞状态查询）：
     1. 发送优雅退出 -> 轮询最多 6 秒；
@@ -935,14 +1046,26 @@ def perform_switch(target_app: str, target_label: str, source_id: str = "", targ
 
     time.sleep(0.25)
     subprocess.Popen(["/usr/bin/open", "-n", target_app])
-    notify_macos(f"已切换到 {target_label}，接力词已复制，Cmd+V 即可继续")
+    if is_login:
+        notify_macos(f"已拉起 {target_label} 登录窗口，请完成 Google 授权登录")
+    else:
+        notify_macos(f"已切换到 {target_label}，接力词已复制，Cmd+V 即可继续")
 
-    # 自动粘贴辅助（若用户启用）：延迟 2.2 秒等待窗口渲染并聚焦后自动模拟 Cmd+V
-    try:
-        auto_paste_script = 'delay 2.2\ntell application "System Events"\n    keystroke "v" using {command down}\nend tell'
-        subprocess.Popen(["/usr/bin/osascript", "-e", auto_paste_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    # 自动粘贴辅助：默认关闭；仅当用户显式开启、非「去登录」且最前窗口确为 Antigravity 时触发，绝不误贴到其他应用
+    if auto_paste and not is_login:
+        try:
+            auto_paste_script = (
+                'delay 2.5\n'
+                'tell application "System Events"\n'
+                '    set frontApp to name of first application process whose frontmost is true\n'
+                '    if frontApp is "Antigravity" then\n'
+                '        keystroke "v" using {command down}\n'
+                '    end if\n'
+                'end tell'
+            )
+            subprocess.Popen(["/usr/bin/osascript", "-e", auto_paste_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 
 def add_account(acc_id: str, note: str, state: dict) -> dict:
@@ -1132,6 +1255,20 @@ def run_doctor(state: dict) -> dict:
     else:
         checks.append({"name": "agy-relay 接力脚本", "status": "warn", "detail": "未找到 ~/.local/bin/agy-relay（不影响本 App 内置接力）"})
 
+    tb3_dir = detect_3tb_brain_dir()
+    if tb3_dir:
+        checks.append({"name": "3TB 中心仓 (SSOT)", "status": "ok", "detail": f"已在线挂载 ({tb3_dir})，交接单自动原子镜像"})
+    else:
+        checks.append({"name": "3TB 中心仓 (SSOT)", "status": "warn", "detail": "未检测到 3TB SMB 挂载卷（交接单仍保存在本地，不影响切号）"})
+
+    net = probe_network_quality(save_cache=True)
+    if net.get("clean_for_antigravity"):
+        region_txt = f"{net.get('country') or '未知地区'} {net.get('region') or ''}".strip()
+        checks.append({"name": "反重力代理节点哨兵", "status": "ok", "detail": f"鉴权通道畅通 · {region_txt} ({net.get('latency_ms', 0)}ms · {net.get('exit_ip') or 'IP未知'})"})
+    else:
+        err_txt = net.get("error_message") or f"出口地区 ({net.get('country') or '未知'}) 或鉴权异常"
+        checks.append({"name": "反重力代理节点哨兵", "status": "error", "detail": f"{err_txt} · 请在 Clash Verge 切至美/日有效节点"})
+
     return {
         "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "checks": checks,
@@ -1144,8 +1281,9 @@ def _read_state_snapshot() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AGY Switch v5.0 CLI Engine")
-    parser.add_argument("--cli-status", action="store_true", help="输出当前账号池状态 JSON")
+    parser = argparse.ArgumentParser(description="AGY Switch v5.6 CLI Engine")
+    parser.add_argument("--cli-status", action="store_true", help="输出当前账号池状态 JSON（零公网阻塞）")
+    parser.add_argument("--cli-network", action="store_true", help="并发探测当前代理节点与反重力鉴权通道并刷新缓存")
     parser.add_argument("--cli-doctor", action="store_true", help="输出本地运行环境体检 JSON")
     parser.add_argument("--cli-sync-assets", action="store_true", help="一键合流并全池共享 Skills / Plugins / Rules")
     parser.add_argument("--cli-add", nargs=2, metavar=("ACC_ID", "NOTE"), help="新增隔离账号实例与启动器")
@@ -1153,10 +1291,12 @@ def main():
     parser.add_argument("--cli-note", nargs=2, metavar=("ACC_ID", "NOTE"), help="更新账号备注")
     parser.add_argument("--cli-calibrate", nargs=3, metavar=("ACC_ID", "PCT_5H", "PCT_7D"), help="校准账号真实剩余百分比")
     parser.add_argument("--cli-autostart", choices=["status", "on", "off"], help="查询或开关 macOS 开机自启")
+    parser.add_argument("--cli-autopaste", choices=["status", "on", "off"], help="查询或开关切号后自动粘贴接力词")
     parser.add_argument("--cli-handoff", action="store_true", help="生成 HANDOFF_AUTO.md 并复制接力词")
     parser.add_argument("--cli-handoff-save", nargs=2, metavar=("TRANSCRIPT", "NOTE"), help="按指定日志与特别交代生成交接单")
     parser.add_argument("--cli-config", nargs=3, metavar=("WORKSPACE", "LIMIT_5H", "LIMIT_7D"), help="更新工作区与预警阈值")
     parser.add_argument("--cli-switch", nargs="?", const="", default=None, help="一键切换账号（空串=跨家庭组智能选满血号）")
+    parser.add_argument("--force", action="store_true", help="配合 --cli-switch 跳过网络哨兵拦截强制启动")
     parser.add_argument("--cli-cooldown", nargs=2, metavar=("ACC_ID", "HOURS"), help="设置账号冷却小时数（0=恢复满血）")
     parser.add_argument("--cli-clear-cooldowns", action="store_true", help="一键解除全部账号冷却")
     parser.add_argument("--cli-restore-handoff", metavar="FILENAME", help="从 .handoff_history 恢复指定交接单")
@@ -1164,6 +1304,22 @@ def main():
     args = parser.parse_args()
 
     try:
+        if args.cli_network:
+            print(json.dumps(probe_network_quality(save_cache=True), ensure_ascii=False))
+            return
+
+        if args.cli_autopaste:
+            if args.cli_autopaste == "status":
+                st = _read_state_snapshot()
+                print(json.dumps({"enabled": bool(st.get("auto_paste", False))}, ensure_ascii=False))
+            else:
+                enabled = args.cli_autopaste == "on"
+                with state_lock(shared=False):
+                    st = load_state()
+                    st["auto_paste"] = enabled
+                    save_state(st)
+                print(json.dumps({"ok": True, "enabled": enabled}, ensure_ascii=False))
+            return
         if args.cli_autostart:
             plist = HOME / "Library" / "LaunchAgents" / "io.agyswitch.app.plist"
             if args.cli_autostart == "status":
@@ -1232,6 +1388,8 @@ def main():
                         "time": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M"),
                     })
             ws_list = list(dict.fromkeys([ws] + [w for w in (state.get("workspaces") or []) if w]))
+            tb3_dir = detect_3tb_brain_dir()
+            cached_net = read_cached_network_status(max_age_sec=300.0)
             print(json.dumps({
                 "version": APP_VERSION,
                 "relay_prompt": RELAY_PROMPT,
@@ -1248,9 +1406,10 @@ def main():
                 "handoff_history": hist_items,
                 "last_switch": state.get("last_switch", ""),
                 "switch_history": (state.get("switch_history") or [])[:10],
-                "tb3_online": bool(detect_3tb_brain_dir()),
-                "tb3_mount": str(detect_3tb_brain_dir() or ""),
-                "network": probe_network_quality(),
+                "auto_paste": bool(state.get("auto_paste", False)),
+                "tb3_online": bool(tb3_dir),
+                "tb3_mount": str(tb3_dir or ""),
+                "network": cached_net,
             }, ensure_ascii=False))
             return
 
@@ -1285,12 +1444,6 @@ def main():
 
         # 切号命令：先在锁外扫描并执行退旧号/拉新号，仅在切换真正成功后的毫秒级临界区内写入 state.json！
         if args.cli_switch is not None:
-            # 启动前节点健康前置拦截：若网络连通性受损或处于封禁区，提前拦截避免污染账号凭据
-            net_status = probe_network_quality()
-            if not net_status.get("clean_for_antigravity", False):
-                err_tip = net_status.get("error_message") or f"当前代理节点处于不可用地区({net_status.get('country')})或鉴权失败"
-                print(json.dumps({"error": f"节点网络异常，已拦截启动：{err_tip}。请在 Clash Verge 切换至有效美国/日本节点后重试！"}, ensure_ascii=False))
-                return
             target_id = args.cli_switch.strip()
             snap = _read_state_snapshot()
             accounts, sessions, running_id, _ = list_accounts(snap)
@@ -1312,15 +1465,38 @@ def main():
                     print(json.dumps({"error": f"桌面启动器不存在: {target['app_path']}"}, ensure_ascii=False))
                     return
 
+            is_login = not bool(target.get("logged_in", False))
+
+            # 启动前节点健康前置拦截：支持 --force 强制旁路；未登录账号「去登录」仅告警不硬阻断
+            if not args.force and not is_login:
+                net_status = probe_network_quality(save_cache=True)
+                if not net_status.get("clean_for_antigravity", False):
+                    err_tip = net_status.get("error_message") or f"当前代理节点处于不可用地区({net_status.get('country') or '未知'})或鉴权失败"
+                    print(json.dumps({
+                        "error": f"节点网络异常，已拦截启动：{err_tip}。请在 Clash Verge 切换至有效美国/日本节点后重试！",
+                        "code": "NETWORK_BLOCKED",
+                        "target_id": target["id"],
+                        "network": net_status,
+                    }, ensure_ascii=False))
+                    return
+
             ws = snap.get("workspace", DEFAULT_WORKSPACE)
             latest_tr = sessions[0]["path"] if sessions else ""
-            try:
-                generate_handoff(ws, transcript_path=latest_tr)
-            except Exception:
-                pass
+            if not is_login:
+                try:
+                    generate_handoff(ws, transcript_path=latest_tr)
+                except Exception:
+                    pass
 
             # 先执行安全退出与拉起（若旧实例拒绝退出则抛异常直接返回 error，不污染冷却与历史状态！）
-            perform_switch(target["app_path"], target["label"], running_id or "main", target["id"])
+            perform_switch(
+                target["app_path"],
+                target["label"],
+                running_id or "main",
+                target["id"],
+                auto_paste=bool(snap.get("auto_paste", False)),
+                is_login=is_login,
+            )
 
             src_acc = next((a for a in accounts if a["id"] == running_id), None)
             src_grp = src_acc["family_group"] if src_acc else ""

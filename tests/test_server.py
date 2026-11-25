@@ -123,6 +123,7 @@ class TestAgySwitchEngine(unittest.TestCase):
             with mock.patch.object(server, "STATE_DIR", tmp_root / "state"), \
                  mock.patch.object(server, "STATE_FILE", tmp_root / "state" / "state.json"), \
                  mock.patch.object(server, "LOCK_FILE", tmp_root / "state" / "state.lock"), \
+                 mock.patch.object(server, "detect_3tb_brain_dir", return_value=None), \
                  mock.patch("subprocess.run"):
                 with server.state_lock():
                     st = server.load_state()
@@ -183,6 +184,121 @@ class TestAgySwitchEngine(unittest.TestCase):
             self.assertTrue((inst6 / ".gemini" / "config" / "plugins" / "modern-web-guidance-plugin").exists())
             cfg6 = json.loads((inst6 / ".gemini" / "config" / "config.json").read_text(encoding="utf-8"))
             self.assertIn("modern-web-guidance-plugin", cfg6["plugins"])
+
+    def test_sync_handoff_to_3tb_atomic_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake_brain = Path(td) / "tom-brain-2026"
+            fake_brain.mkdir(parents=True)
+            with mock.patch.object(server, "detect_3tb_brain_dir", return_value=fake_brain):
+                out = server.sync_handoff_to_3tb("# Handoff OK", filename="HANDOFF_TEST.md")
+            self.assertIsNotNone(out)
+            handoff_dir = fake_brain / "06-Codex对话" / "AGY_Handoff"
+            self.assertEqual((handoff_dir / "HANDOFF_TEST.md").read_text(encoding="utf-8"), "# Handoff OK")
+            self.assertEqual((handoff_dir / "HANDOFF_LATEST.md").read_text(encoding="utf-8"), "# Handoff OK")
+            # 确保临时文件已清理
+            self.assertEqual(list(handoff_dir.glob("*.tmp")), [])
+
+    def test_probe_network_quality_region_and_ok_flags(self):
+        class FakeResp:
+            def __init__(self, status, body=b""):
+                self.status = status
+                self._body = body
+            def read(self):
+                return self._body
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        # 1. 美国干净节点放行
+        def urlopen_us(req, timeout=2.0):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "antigravity.google" in url:
+                return FakeResp(200)
+            if "accounts.google.com" in url:
+                return FakeResp(204)
+            return FakeResp(200, json.dumps({"ip": "1.2.3.4", "country": "US", "city": "LA", "region": "CA"}).encode())
+
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen_us):
+            res_us = server.probe_network_quality(save_cache=False)
+        self.assertTrue(res_us["ok"])
+        self.assertTrue(res_us["clean_for_antigravity"])
+        self.assertEqual(res_us["country"], "US")
+
+        # 2. 香港受限地区拦截
+        def urlopen_hk(req, timeout=2.0):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "antigravity.google" in url:
+                return FakeResp(200)
+            if "accounts.google.com" in url:
+                return FakeResp(204)
+            return FakeResp(200, json.dumps({"ip": "5.6.7.8", "country": "HK"}).encode())
+
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen_hk):
+            res_hk = server.probe_network_quality(save_cache=False)
+        self.assertTrue(res_hk["ok"])
+        self.assertFalse(res_hk["clean_for_antigravity"])
+        self.assertIn("HK", res_hk["error_message"])
+
+        # 3. 全链路超时 ok 必须为 False
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("timeout")):
+            res_fail = server.probe_network_quality(save_cache=False)
+        self.assertFalse(res_fail["ok"])
+        self.assertFalse(res_fail["clean_for_antigravity"])
+
+    def test_same_email_active_account_infers_family_group_collision(self):
+        accounts = [
+            {
+                "id": "main", "email": "busmusbrw@gmail.com", "family_group": "", "solo_group": False,
+                "logged_in": True, "health": "ready", "app_exists": True, "running": True, "flagged": False,
+                "turns_5h": 10, "turns_7d": 50, "latest_mtime": 100.0,
+            },
+            {
+                "id": "9-busmusbrw", "email": "busmusbrw@gmail.com", "family_group": "A", "solo_group": False,
+                "logged_in": True, "health": "ready", "app_exists": True, "running": False, "flagged": False,
+                "turns_5h": 0, "turns_7d": 0, "latest_mtime": 0.0,
+            },
+            {
+                "id": "2-djgarbage", "email": "djgarbage@gmail.com", "family_group": "A", "solo_group": False,
+                "logged_in": True, "health": "ready", "app_exists": True, "running": False, "flagged": False,
+                "turns_5h": 0, "turns_7d": 0, "latest_mtime": 0.0,
+            },
+            {
+                "id": "5-tomyi0703", "email": "tomyi0703@gmail.com", "family_group": "C", "solo_group": False,
+                "logged_in": True, "health": "ready", "app_exists": True, "running": False, "flagged": False,
+                "turns_5h": 2, "turns_7d": 5, "latest_mtime": 20.0,
+            },
+        ]
+        ranked = server.pick_best_candidates(accounts, "main")
+        ids = [a["id"] for a in ranked]
+        # 跳过同邮箱重复实例 9-busmusbrw，且识别 main 属 A 组，优先推跨组 C 组而非同组 A 组 2-djgarbage
+        self.assertNotIn("9-busmusbrw", ids)
+        self.assertEqual(ids[0], "5-tomyi0703")
+        self.assertEqual(ids[1], "2-djgarbage")
+        self.assertIn("同组兜底", ranked[1]["recommend_reason"])
+
+    def test_perform_switch_auto_paste_respects_flag_and_login_state(self):
+        with mock.patch.object(server, "detect_running_instance", return_value=("", 0)), \
+             mock.patch.object(server, "unify_shared_assets"), \
+             mock.patch.object(server, "sync_conversations"), \
+             mock.patch.object(server, "notify_macos"), \
+             mock.patch("time.sleep"), \
+             mock.patch("subprocess.Popen") as popen_mock:
+            # 1. 默认 auto_paste=False，仅 open 不发 osascript
+            server.perform_switch("/tmp/fake.app", "fake", auto_paste=False, is_login=False)
+            self.assertEqual(popen_mock.call_count, 1)
+
+            # 2. auto_paste=True 但 is_login=True，去登录绝不发 Cmd+V
+            popen_mock.reset_mock()
+            server.perform_switch("/tmp/fake.app", "fake", auto_paste=True, is_login=True)
+            self.assertEqual(popen_mock.call_count, 1)
+
+            # 3. auto_paste=True 且非登录，才触发安全校验的 osascript
+            popen_mock.reset_mock()
+            server.perform_switch("/tmp/fake.app", "fake", auto_paste=True, is_login=False)
+            self.assertEqual(popen_mock.call_count, 2)
+            script_arg = popen_mock.call_args_list[1][0][0][2]
+            self.assertIn('if frontApp is "Antigravity"', script_arg)
 
 
 if __name__ == "__main__":

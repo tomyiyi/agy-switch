@@ -1,11 +1,12 @@
 import Cocoa
 import SwiftUI
 
-let APP_VERSION = "5.5.0"
+let APP_VERSION = "5.6.0"
 
 struct AccountInfo: Decodable, Identifiable {
     let id: String
     let label: String
+    let email: String?
     let note: String
     let family_group: String?
     let is_manager: Bool?
@@ -38,6 +39,7 @@ struct AccountInfo: Decodable, Identifiable {
     var isFlagged: Bool { flagged ?? false }
     var displayCleanNote: String { clean_note ?? note }
     var recommendTag: String { recommend_reason ?? "" }
+    var displayEmail: String { (email ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
 struct SessionInfo: Decodable, Identifiable {
@@ -79,6 +81,29 @@ struct NetworkStatusInfo: Decodable {
     let auth_ok: Bool
     let clean_for_antigravity: Bool
     let error_message: String
+
+    var badgeTitle: String {
+        if !clean_for_antigravity {
+            return country.isEmpty ? "⚠️ 节点异常" : "⚠️ \(country) 受限"
+        }
+        let loc = country.isEmpty ? "已连通" : country
+        return "🌐 \(loc) · \(latency_ms)ms"
+    }
+
+    var helpDetail: String {
+        if clean_for_antigravity {
+            let ipPart = exit_ip.isEmpty ? "IP未知" : exit_ip
+            let regPart = region.isEmpty ? (country.isEmpty ? "可用区域" : country) : region
+            return "出口: \(ipPart) (\(regPart)) · 反重力鉴权畅通 · 点击重测"
+        }
+        return error_message.isEmpty ? "当前节点处于不可用地区或鉴权失败，请切美/日节点 · 点击重测" : "\(error_message) · 点击重测"
+    }
+}
+
+struct BlockedSwitchAlert: Identifiable {
+    let id = UUID()
+    let targetId: String
+    let message: String
 }
 
 struct StatusPayload: Decodable {
@@ -97,6 +122,7 @@ struct StatusPayload: Decodable {
     let handoff_history: [HandoffHistItem]?
     let last_switch: String?
     let switch_history: [SwitchRecord]?
+    let auto_paste: Bool?
     let tb3_online: Bool?
     let tb3_mount: String?
     let network: NetworkStatusInfo?
