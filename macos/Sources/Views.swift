@@ -450,6 +450,8 @@ struct AccountsView: View {
             let q = searchText.trimmingCharacters(in: .whitespaces)
             let matchSearch = q.isEmpty
                 || acc.label.localizedCaseInsensitiveContains(q)
+                || acc.displayEmail.localizedCaseInsensitiveContains(q)
+                || acc.groupLetter.localizedCaseInsensitiveContains(q)
                 || acc.note.localizedCaseInsensitiveContains(q)
             return matchFilter && matchSearch
         }

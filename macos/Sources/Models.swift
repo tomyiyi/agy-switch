@@ -1,7 +1,7 @@
 import Cocoa
 import SwiftUI
 
-let APP_VERSION = "5.7.0"
+let APP_VERSION = "5.8.0"
 
 enum ToastKind {
     case info, success, warning, error

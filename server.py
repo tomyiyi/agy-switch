@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-APP_VERSION = "5.7.0"
+APP_VERSION = "5.8.0"
 
 _raw_home = str(Path.home())
 HOME = (

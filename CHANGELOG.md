@@ -1,5 +1,9 @@
 # 更新日志 (CHANGELOG)
 
+## v5.8.0 (2026-11-25)
+- **全场景 Clash 节点直控闭环**：继总览页后，顶部系统菜单栏（`⚡` 下拉菜单新增「切换 Clash 节点」子菜单与「自动优选」）及全局浮窗 `QuickSwitchHUDView`（`⌃⌥A` 底部哨兵胶囊点击弹出 `NetworkSentinelPopover`）现已全数打通，不打开主窗口即可随时切换与优选健康节点。
+- **账号池全布局视觉对齐与搜索增强**：`AccountsView` 搜索框扩展支持邮箱与家庭组字母（如搜 `busmus` 或 `D`）；列表模式 `AccountListRow` 与紧凑模式 `CompactMiniAccountCard` 同步呈现同邮箱撞车提醒（`duplicateTarget`），三种布局体验完全一致。
+
 ## v5.7.0 (2026-11-25)
 - **Clash Verge 本地控制直连与一键优选 (`--cli-clash-switch` / `--cli-clash-auto`)**：零外部依赖直连 `/var/run/clash-verge-service/users/*/verge-mihomo.sock`，在总览页节点哨兵直接显示当前节点名（如 `US · 美国东部`）；点击弹出原生 `NetworkSentinelPopover`，展示出口 IP/通道健康度与合规候选节点，支持点击秒切与用 `antigravity.google/favicon.svg` 并发测活「自动优选」最快健康节点。
 - **视觉减法与卡片标题零截断**：移除推荐池卡片冗余的静态「已登录」绿色胶囊，家庭组主号徽章收敛为克制的描边样式，彻底释放顶行宽度让 `6-tomyi0705` 等长账号名完整显示；顶部状态栏去掉重复的「跨组首选」，统一为「可接力 X / 总池 Y」对齐用户心智。

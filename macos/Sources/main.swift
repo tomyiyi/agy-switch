@@ -359,6 +359,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(netItem)
         }
 
+        if let clash = store.clashStatus ?? store.status?.clash, clash.available {
+            let clashParent = NSMenuItem(title: "🌐 切换 Clash 节点 (\(clash.active_node))", action: nil, keyEquivalent: "")
+            let subMenu = NSMenu()
+
+            let autoItem = NSMenuItem(title: "✨ 自动优选最快健康节点", action: #selector(menuClashAutoSelect(_:)), keyEquivalent: "")
+            autoItem.target = self
+            autoItem.representedObject = clash.active_group
+            subMenu.addItem(autoItem)
+            subMenu.addItem(NSMenuItem.separator())
+
+            for cand in clash.candidates {
+                let latTxt = cand.delay_ms > 0 ? " (\(cand.delay_ms)ms)" : ""
+                let nodeItem = NSMenuItem(title: "\(cand.name)\(latTxt)", action: #selector(menuClashSwitchNode(_:)), keyEquivalent: "")
+                nodeItem.target = self
+                nodeItem.state = cand.selected ? .on : .off
+                nodeItem.representedObject = [clash.active_group, cand.name]
+                subMenu.addItem(nodeItem)
+            }
+            clashParent.submenu = subMenu
+            menu.addItem(clashParent)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         let candidates = store.recommendedAccounts.prefix(8)
@@ -416,6 +438,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func menuProbeNetwork() {
         store.probeNetwork(showFeedback: true)
+    }
+
+    @objc private func menuClashAutoSelect(_ sender: NSMenuItem) {
+        let group = (sender.representedObject as? String) ?? ""
+        store.clashAutoSelect(group: group)
+    }
+
+    @objc private func menuClashSwitchNode(_ sender: NSMenuItem) {
+        if let pair = sender.representedObject as? [String], pair.count == 2 {
+            store.clashSwitchNode(group: pair[0], node: pair[1])
+        }
     }
 
     @objc private func menuRefresh() {

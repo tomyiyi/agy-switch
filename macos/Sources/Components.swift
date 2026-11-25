@@ -432,14 +432,21 @@ struct CompactMiniAccountCard: View {
                 }
             }
             HStack(spacing: 6) {
-                Text(acc.logged_in ? "5h \(acc.turns_5h)轮" : "待登录")
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundColor(acc.logged_in ? (acc.turns_5h == 0 ? DS.brandGreen : .primary) : DS.brandOrange)
-                if acc.logged_in {
-                    Text("·").foregroundColor(.secondary)
-                    Text("7d \(acc.turns_7d)轮")
-                        .font(.system(size: 11).monospacedDigit())
-                        .foregroundColor(.secondary)
+                if !acc.logged_in && !acc.duplicateTarget.isEmpty {
+                    Text("与 \(acc.duplicateTarget) 撞车")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.brandOrange)
+                        .lineLimit(1)
+                } else {
+                    Text(acc.logged_in ? "5h \(acc.turns_5h)轮" : "待登录")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundColor(acc.logged_in ? (acc.turns_5h == 0 ? DS.brandGreen : .primary) : DS.brandOrange)
+                    if acc.logged_in {
+                        Text("·").foregroundColor(.secondary)
+                        Text("7d \(acc.turns_7d)轮")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
                 }
                 Spacer()
                 Button(acc.running ? "使用中" : (!acc.logged_in ? "去登录" : "切换")) { onSwitch() }
@@ -491,12 +498,18 @@ struct AccountListRow: View {
                                 .background(Capsule().fill(fam.isManager ? fam.tint : fam.tint.opacity(0.13)))
                         }
                     }
-                    let subLine = !acc.displayEmail.isEmpty
-                        ? (fam.cleanNote.isEmpty ? acc.displayEmail : "\(acc.displayEmail) · \(fam.cleanNote)")
-                        : (fam.cleanNote.isEmpty ? "活跃 \(acc.latest_active)" : fam.cleanNote)
+                    let subLine: String = {
+                        if !acc.logged_in && !acc.duplicateTarget.isEmpty {
+                            return "⚠️ 与 \(acc.duplicateTarget) 邮箱重复，无需再登"
+                        }
+                        if !acc.displayEmail.isEmpty {
+                            return fam.cleanNote.isEmpty ? acc.displayEmail : "\(acc.displayEmail) · \(fam.cleanNote)"
+                        }
+                        return fam.cleanNote.isEmpty ? "活跃 \(acc.latest_active)" : fam.cleanNote
+                    }()
                     Text(subLine)
                         .font(.system(size: 10.5))
-                        .foregroundColor(fam.isFlagged ? DS.brandOrange : .secondary)
+                        .foregroundColor((fam.isFlagged || (!acc.logged_in && !acc.duplicateTarget.isEmpty)) ? DS.brandOrange : .secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -576,6 +589,7 @@ struct QuickSwitchHUDView: View {
     var onDismiss: () -> Void
 
     @FocusState private var searchFocused: Bool
+    @State private var showNetworkPopover: Bool = false
 
     private var allCandidates: [AccountInfo] {
         guard let s = store.status else { return [] }
@@ -849,12 +863,12 @@ struct QuickSwitchHUDView: View {
                 .background(Capsule().fill(Color.primary.opacity(0.05)))
 
                 if let net = store.networkStatus ?? store.status?.network {
-                    Button(action: { store.probeNetwork(showFeedback: true) }) {
+                    Button(action: { showNetworkPopover.toggle() }) {
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(net.clean_for_antigravity ? DS.brandGreen : Color.red)
                                 .frame(width: 6, height: 6)
-                            Text(store.isProbingNetwork ? "测活中..." : net.badgeTitle)
+                            Text(store.isProbingNetwork || store.isSwitchingClash ? "测活中..." : net.badgeTitle)
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundColor(net.clean_for_antigravity ? DS.brandGreen : .red)
                                 .lineLimit(1)
@@ -865,6 +879,9 @@ struct QuickSwitchHUDView: View {
                     }
                     .buttonStyle(.plain)
                     .help(net.helpDetail)
+                    .popover(isPresented: $showNetworkPopover, arrowEdge: .top) {
+                        NetworkSentinelPopover(store: store)
+                    }
                 }
 
                 Spacer()
