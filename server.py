@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AGY Switch v5.6 — Antigravity 原生多账号池管理与跨家庭组智能接力引擎
+AGY Switch v5.7 — Antigravity 原生多账号池管理与跨家庭组智能接力引擎
 零第三方依赖，仅使用 Python 3 标准库，严格遵守本地只读安全边界（绝不触碰私有 OAuth Token API）。
 """
 
@@ -9,22 +9,25 @@ import concurrent.futures
 import contextlib
 import fcntl
 import glob
+import http.client
 import json
 import os
 import re
 import signal
 import shutil
+import socket
 import sqlite3
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-APP_VERSION = "5.6.0"
+APP_VERSION = "5.7.0"
 
 _raw_home = str(Path.home())
 HOME = (
@@ -467,7 +470,24 @@ def list_accounts(state: dict):
             "latest_active": metrics["latest_active"],
             "latest_mtime": metrics["latest_mtime"],
             "cooldown_remaining_min": remaining_min,
+            "duplicate_of": "",
         })
+
+    # 标记同邮箱撞车实例（便于 UI 提示避免重复登录浪费配置）
+    email_owners: Dict[str, str] = {}
+    for a in sorted(accounts, key=lambda x: (not x["running"], not x["logged_in"], x["id"] != "main", x["id"])):
+        em = str(a.get("email") or "").strip().lower()
+        if em and em not in email_owners:
+            email_owners[em] = a["id"]
+    prefix_owners = {em.split("@", 1)[0]: oid for em, oid in email_owners.items() if "@" in em}
+    for a in accounts:
+        em = str(a.get("email") or "").strip().lower()
+        if em and em in email_owners and email_owners[em] != a["id"]:
+            a["duplicate_of"] = email_owners[em]
+        elif not a.get("logged_in"):
+            short_id = a["id"].split("-", 1)[-1].lower()
+            if short_id in prefix_owners and prefix_owners[short_id] != a["id"]:
+                a["duplicate_of"] = prefix_owners[short_id]
 
     ranked = pick_best_candidates(accounts, running_id)
     recommended_ids = [a["id"] for a in ranked[:6]]
@@ -991,6 +1011,184 @@ def probe_network_quality(save_cache: bool = True) -> dict:
     return result
 
 
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """通过 Unix Domain Socket 连接本地 Clash Verge Mihomo 控制接口（零外部依赖）。"""
+
+    def __init__(self, socket_path: str, timeout: float = 2.0):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+
+def detect_clash_socket() -> str:
+    env_sock = os.environ.get("AGY_CLASH_SOCKET", "").strip()
+    if env_sock:
+        return env_sock if os.path.exists(env_sock) else ""
+    uid = os.getuid()
+    direct = f"/var/run/clash-verge-service/users/{uid}/verge-mihomo.sock"
+    if os.path.exists(direct):
+        return direct
+    for p in sorted(glob.glob("/var/run/clash-verge-service/users/*/verge-mihomo.sock")):
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def _clash_request(sock_path: str, method: str, path: str, body: Optional[dict] = None, timeout: float = 2.0):
+    conn = _UnixHTTPConnection(sock_path, timeout=timeout)
+    try:
+        headers = {"Host": "localhost"}
+        payload = None
+        if body is not None:
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read()
+        data = json.loads(raw.decode("utf-8")) if raw else {}
+        return resp.status, data
+    finally:
+        conn.close()
+
+
+def _pick_primary_clash_group(proxies: dict) -> Optional[str]:
+    """优先匹配 AI / Gemini / 自动选择代理组（兼容不同 emoji 或命名）。"""
+    keywords = ("gemini", "ai", "自动", "select", "proxy")
+    selectors = [
+        (name, info)
+        for name, info in proxies.items()
+        if isinstance(info, dict) and info.get("type") in ("Selector", "URLTest") and name != "GLOBAL"
+    ]
+    for kw in keywords:
+        for name, _ in selectors:
+            if kw in name.lower():
+                return name
+    return selectors[0][0] if selectors else None
+
+
+def _is_blocked_node_name(name: str) -> bool:
+    low = name.lower()
+    return any(tok in low for tok in ("香港", "hk", "hong kong", "china", "cn", "russia", "ru", "iran", "direct", "reject", "剩余", "套餐", "过期", "官网"))
+
+
+def get_clash_status() -> dict:
+    sock_path = detect_clash_socket()
+    if not sock_path:
+        return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+    try:
+        status_code, data = _clash_request(sock_path, "GET", "/proxies", timeout=1.2)
+        if status_code != 200 or not isinstance(data, dict):
+            return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+        proxies = data.get("proxies", {})
+        group_name = _pick_primary_clash_group(proxies)
+        if not group_name or group_name not in proxies:
+            return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+
+        ginfo = proxies[group_name]
+        active_node = str(ginfo.get("now") or "")
+        active_hist = (proxies.get(active_node) or {}).get("history") or []
+        active_delay = int(active_hist[-1].get("delay", 0)) if active_hist else 0
+
+        candidates = []
+        for n in ginfo.get("all", []):
+            if _is_blocked_node_name(n):
+                continue
+            ninfo = proxies.get(n) or {}
+            hist = ninfo.get("history") or []
+            delay = int(hist[-1].get("delay", 0)) if hist else 0
+            if delay > 0 or n == active_node:
+                candidates.append({
+                    "name": n,
+                    "delay_ms": delay,
+                    "type": str(ninfo.get("type") or ""),
+                    "selected": (n == active_node),
+                })
+        candidates.sort(key=lambda c: (not c["selected"], c["delay_ms"] if c["delay_ms"] > 0 else 99999, c["name"]))
+        return {
+            "available": True,
+            "active_group": group_name,
+            "active_node": active_node,
+            "delay_ms": active_delay,
+            "candidates": candidates[:8],
+        }
+    except Exception:
+        return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+
+
+def switch_clash_node(node: str, group: str = "") -> dict:
+    sock_path = detect_clash_socket()
+    if not sock_path:
+        return {"error": "未检测到本地 Clash Verge 控制通道 (verge-mihomo.sock)"}
+    try:
+        code, data = _clash_request(sock_path, "GET", "/proxies", timeout=1.5)
+        if code != 200:
+            return {"error": f"读取 Clash 代理组失败 (HTTP {code})"}
+        proxies = data.get("proxies", {})
+        target_group = group or _pick_primary_clash_group(proxies) or ""
+        if not target_group or target_group not in proxies:
+            return {"error": "未找到可用的 Clash 代理组"}
+        enc_group = urllib.parse.quote(target_group, safe="")
+        put_code, _ = _clash_request(sock_path, "PUT", f"/proxies/{enc_group}", body={"name": node}, timeout=1.5)
+        if put_code not in (200, 204):
+            return {"error": f"切换节点失败 (HTTP {put_code})"}
+        net = probe_network_quality(save_cache=True)
+        return {"ok": True, "group": target_group, "node": node, "network": net, "clash": get_clash_status()}
+    except Exception as e:
+        return {"error": f"切换 Clash 节点异常: {e}"}
+
+
+def auto_select_clash_node(group: str = "") -> dict:
+    """并发用 antigravity.google/favicon.svg 对当前代理组候选节点测活，自动切换至最低延迟健康节点。"""
+    sock_path = detect_clash_socket()
+    if not sock_path:
+        return {"error": "未检测到本地 Clash Verge 控制通道 (verge-mihomo.sock)"}
+    try:
+        code, data = _clash_request(sock_path, "GET", "/proxies", timeout=1.5)
+        if code != 200:
+            return {"error": f"读取 Clash 代理组失败 (HTTP {code})"}
+        proxies = data.get("proxies", {})
+        target_group = group or _pick_primary_clash_group(proxies) or ""
+        if not target_group or target_group not in proxies:
+            return {"error": "未找到可用的 Clash 代理组"}
+
+        all_nodes = [n for n in proxies[target_group].get("all", []) if not _is_blocked_node_name(n)]
+        if not all_nodes:
+            return {"error": f"代理组 {target_group} 中没有可测速的合规节点"}
+
+        def _probe_one(node_name: str):
+            enc_n = urllib.parse.quote(node_name, safe="")
+            q_url = urllib.parse.quote("https://antigravity.google/favicon.svg", safe="")
+            try:
+                sc, res = _clash_request(sock_path, "GET", f"/proxies/{enc_n}/delay?timeout=2500&url={q_url}", timeout=3.2)
+                if sc == 200 and isinstance(res, dict) and int(res.get("delay", 0)) > 0:
+                    return (node_name, int(res["delay"]))
+            except Exception:
+                pass
+            return None
+
+        healthy = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            for item in ex.map(_probe_one, all_nodes[:24]):
+                if item:
+                    healthy.append(item)
+
+        if not healthy:
+            return {"error": f"代理组 {target_group} 中所有候选节点均无法连通 Antigravity"}
+        healthy.sort(key=lambda x: x[1])
+        best_node, best_delay = healthy[0]
+        res = switch_clash_node(best_node, group=target_group)
+        if res.get("ok"):
+            res["best_delay_ms"] = best_delay
+        return res
+    except Exception as e:
+        return {"error": f"自动优选 Clash 节点失败: {e}"}
+
+
 def perform_switch(
     target_app: str,
     target_label: str,
@@ -1281,9 +1479,11 @@ def _read_state_snapshot() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AGY Switch v5.6 CLI Engine")
+    parser = argparse.ArgumentParser(description="AGY Switch v5.7 CLI Engine")
     parser.add_argument("--cli-status", action="store_true", help="输出当前账号池状态 JSON（零公网阻塞）")
     parser.add_argument("--cli-network", action="store_true", help="并发探测当前代理节点与反重力鉴权通道并刷新缓存")
+    parser.add_argument("--cli-clash-switch", nargs=2, metavar=("GROUP", "NODE"), help="切换指定 Clash 代理组节点（GROUP 可为空串自动匹配）")
+    parser.add_argument("--cli-clash-auto", nargs="?", const="", default=None, metavar="GROUP", help="自动对当前代理组节点并发测活并切至最快健康节点")
     parser.add_argument("--cli-doctor", action="store_true", help="输出本地运行环境体检 JSON")
     parser.add_argument("--cli-sync-assets", action="store_true", help="一键合流并全池共享 Skills / Plugins / Rules")
     parser.add_argument("--cli-add", nargs=2, metavar=("ACC_ID", "NOTE"), help="新增隔离账号实例与启动器")
@@ -1305,7 +1505,18 @@ def main():
 
     try:
         if args.cli_network:
-            print(json.dumps(probe_network_quality(save_cache=True), ensure_ascii=False))
+            net = probe_network_quality(save_cache=True)
+            net["clash"] = get_clash_status()
+            print(json.dumps(net, ensure_ascii=False))
+            return
+
+        if args.cli_clash_switch:
+            grp, node = args.cli_clash_switch
+            print(json.dumps(switch_clash_node(node=node, group=grp), ensure_ascii=False))
+            return
+
+        if args.cli_clash_auto is not None:
+            print(json.dumps(auto_select_clash_node(group=args.cli_clash_auto), ensure_ascii=False))
             return
 
         if args.cli_autopaste:
@@ -1410,6 +1621,7 @@ def main():
                 "tb3_online": bool(tb3_dir),
                 "tb3_mount": str(tb3_dir or ""),
                 "network": cached_net,
+                "clash": get_clash_status(),
             }, ensure_ascii=False))
             return
 

@@ -5,12 +5,15 @@ final class SwitchStore: ObservableObject {
     @Published var status: StatusPayload?
     @Published var doctor: DoctorPayload?
     @Published var toast: String = ""
+    @Published var toastKind: ToastKind = .info
     @Published var isBusy: Bool = false
     @Published var isRefreshing: Bool = false
     @Published var autoStartEnabled: Bool = false
     @Published var autoPasteEnabled: Bool = false
     @Published var networkStatus: NetworkStatusInfo?
+    @Published var clashStatus: ClashStatusInfo?
     @Published var isProbingNetwork: Bool = false
+    @Published var isSwitchingClash: Bool = false
     @Published var blockedSwitchAlert: BlockedSwitchAlert?
     @Published var lowQuotaThreshold: Int = UserDefaults.standard.object(forKey: "agy_low_threshold") == nil ? 15 : UserDefaults.standard.integer(forKey: "agy_low_threshold")
 
@@ -115,30 +118,39 @@ final class SwitchStore: ObservableObject {
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 DispatchQueue.main.async {
                     self.isBusy = false
-                    self.showToast("操作失败：后端执行异常 (code \(res.exitCode))")
+                    self.showToast("操作失败：后端执行异常 (code \(res.exitCode))", kind: .error)
                 }
                 return
             }
             if let err = obj["error"] as? String, !err.isEmpty {
                 DispatchQueue.main.async {
                     self.isBusy = false
-                    self.showToast("失败：\(err)")
+                    self.showToast("失败：\(err)", kind: .error)
                 }
                 return
             }
             DispatchQueue.main.async {
                 self.isBusy = false
-                self.showToast(successToast)
+                self.showToast(successToast, kind: .success)
                 onSuccess?(obj)
                 self.refresh()
             }
         }
     }
 
-    func showToast(_ msg: String) {
-        DispatchQueue.main.async { self.toast = msg }
+    func showToast(_ msg: String, kind: ToastKind = .info) {
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                self.toastKind = kind
+                self.toast = msg
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) {
-            if self.toast == msg { self.toast = "" }
+            if self.toast == msg {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    self.toast = ""
+                }
+            }
         }
     }
 
@@ -208,10 +220,13 @@ final class SwitchStore: ObservableObject {
                 if self.networkStatus == nil, let cachedNet = decoded.network {
                     self.networkStatus = cachedNet
                 }
+                if let clash = decoded.clash {
+                    self.clashStatus = clash
+                }
                 self.isRefreshing = false
                 self.checkLowQuotaNotification(decoded)
                 if showFeedback {
-                    self.showToast("已刷新（\(nowStr)）· 当前：\(decoded.running_id.isEmpty ? "未运行" : decoded.running_id)")
+                    self.showToast("已刷新（\(nowStr)）· 当前：\(decoded.running_id.isEmpty ? "未运行" : decoded.running_id)", kind: .success)
                 }
             }
         }
@@ -228,19 +243,76 @@ final class SwitchStore: ObservableObject {
                   let decoded = try? JSONDecoder().decode(NetworkStatusInfo.self, from: data) else {
                 DispatchQueue.main.async {
                     self.isProbingNetwork = false
-                    if showFeedback { self.showToast("节点探测失败，请检查代理软件状态") }
+                    if showFeedback { self.showToast("节点探测失败，请检查代理软件状态", kind: .error) }
                 }
                 return
             }
             DispatchQueue.main.async {
                 self.networkStatus = decoded
+                if let clash = decoded.clash {
+                    self.clashStatus = clash
+                }
                 self.isProbingNetwork = false
                 if showFeedback {
-                    self.showToast(decoded.clean_for_antigravity
-                        ? "节点健康：\(decoded.badgeTitle) (\(decoded.exit_ip))"
-                        : "节点异常：\(decoded.error_message.isEmpty ? decoded.badgeTitle : decoded.error_message)")
+                    self.showToast(
+                        decoded.clean_for_antigravity
+                            ? "节点健康：\(decoded.badgeTitle) (\(decoded.exit_ip))"
+                            : "节点异常：\(decoded.error_message.isEmpty ? decoded.badgeTitle : decoded.error_message)",
+                        kind: decoded.clean_for_antigravity ? .success : .warning
+                    )
                 }
             }
+        }
+    }
+
+    func clashSwitchNode(group: String, node: String) {
+        DispatchQueue.main.async { self.isSwitchingClash = true }
+        netQueue.async { [weak self] in
+            guard let self = self else { return }
+            let res = self.runCLISync(["--cli-clash-switch", group, node])
+            self.handleClashActionResult(res, fallbackPrefix: "切节点")
+        }
+    }
+
+    func clashAutoSelect(group: String = "") {
+        DispatchQueue.main.async { self.isSwitchingClash = true }
+        netQueue.async { [weak self] in
+            guard let self = self else { return }
+            let res = self.runCLISync(["--cli-clash-auto", group])
+            self.handleClashActionResult(res, fallbackPrefix: "自动优选")
+        }
+    }
+
+    private func handleClashActionResult(_ res: (data: Data?, exitCode: Int32), fallbackPrefix: String) {
+        guard res.exitCode == 0, let data = res.data,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            DispatchQueue.main.async {
+                self.isSwitchingClash = false
+                self.showToast("\(fallbackPrefix)失败：Clash 服务未响应", kind: .error)
+            }
+            return
+        }
+        if let err = obj["error"] as? String, !err.isEmpty {
+            DispatchQueue.main.async {
+                self.isSwitchingClash = false
+                self.showToast(err, kind: .error)
+            }
+            return
+        }
+        let chosenNode = obj["node"] as? String ?? ""
+        let netData = (obj["network"] as? [String: Any]).flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+        let netDecoded = netData.flatMap { try? JSONDecoder().decode(NetworkStatusInfo.self, from: $0) }
+        let clashData = (obj["clash"] as? [String: Any]).flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+        let clashDecoded = clashData.flatMap { try? JSONDecoder().decode(ClashStatusInfo.self, from: $0) }
+        DispatchQueue.main.async {
+            if let n = netDecoded { self.networkStatus = n }
+            if let c = clashDecoded { self.clashStatus = c }
+            self.isSwitchingClash = false
+            let ok = netDecoded?.clean_for_antigravity ?? true
+            self.showToast(
+                ok ? "已切至节点「\(chosenNode)」且 Antigravity 通道畅通" : "已切至「\(chosenNode)」，但该节点出口受限或不可达",
+                kind: ok ? .success : .warning
+            )
         }
     }
 

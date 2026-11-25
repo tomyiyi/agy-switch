@@ -1,7 +1,11 @@
 import Cocoa
 import SwiftUI
 
-let APP_VERSION = "5.6.0"
+let APP_VERSION = "5.7.0"
+
+enum ToastKind {
+    case info, success, warning, error
+}
 
 struct AccountInfo: Decodable, Identifiable {
     let id: String
@@ -31,6 +35,7 @@ struct AccountInfo: Decodable, Identifiable {
     let kb_7d: Double
     let latest_active: String
     let cooldown_remaining_min: Int
+    let duplicate_of: String?
 
     var groupLetter: String { (family_group ?? "").uppercased() }
     var isGroupManager: Bool { is_manager ?? false }
@@ -40,6 +45,14 @@ struct AccountInfo: Decodable, Identifiable {
     var displayCleanNote: String { clean_note ?? note }
     var recommendTag: String { recommend_reason ?? "" }
     var displayEmail: String { (email ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+    var duplicateTarget: String { (duplicate_of ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+    var shortTitle: String {
+        if id == "main" && !displayEmail.isEmpty {
+            let prefix = displayEmail.split(separator: "@").first.map(String.init) ?? ""
+            if !prefix.isEmpty { return "主账号 · \(prefix)" }
+        }
+        return label
+    }
 }
 
 struct SessionInfo: Decodable, Identifiable {
@@ -70,6 +83,22 @@ struct SwitchRecord: Decodable, Identifiable {
 }
 
 
+struct ClashNodeCandidate: Decodable, Identifiable {
+    var id: String { name }
+    let name: String
+    let delay_ms: Int
+    let type: String?
+    let selected: Bool
+}
+
+struct ClashStatusInfo: Decodable {
+    let available: Bool
+    let active_group: String
+    let active_node: String
+    let delay_ms: Int
+    let candidates: [ClashNodeCandidate]
+}
+
 struct NetworkStatusInfo: Decodable {
     let ok: Bool
     let exit_ip: String
@@ -81,22 +110,27 @@ struct NetworkStatusInfo: Decodable {
     let auth_ok: Bool
     let clean_for_antigravity: Bool
     let error_message: String
+    let clash: ClashStatusInfo?
 
     var badgeTitle: String {
         if !clean_for_antigravity {
             return country.isEmpty ? "⚠️ 节点异常" : "⚠️ \(country) 受限"
         }
         let loc = country.isEmpty ? "已连通" : country
-        return "🌐 \(loc) · \(latency_ms)ms"
+        if let c = clash, c.available, !c.active_node.isEmpty {
+            return "\(loc) · \(c.active_node)"
+        }
+        return "\(loc) · \(latency_ms)ms"
     }
 
     var helpDetail: String {
         if clean_for_antigravity {
             let ipPart = exit_ip.isEmpty ? "IP未知" : exit_ip
             let regPart = region.isEmpty ? (country.isEmpty ? "可用区域" : country) : region
-            return "出口: \(ipPart) (\(regPart)) · 反重力鉴权畅通 · 点击重测"
+            let nodePart = (clash?.available == true && !(clash?.active_node.isEmpty ?? true)) ? " · 节点: \(clash!.active_node)" : ""
+            return "出口: \(ipPart) (\(regPart))\(nodePart) · 点击管理节点"
         }
-        return error_message.isEmpty ? "当前节点处于不可用地区或鉴权失败，请切美/日节点 · 点击重测" : "\(error_message) · 点击重测"
+        return error_message.isEmpty ? "当前节点处于不可用地区或鉴权失败 · 点击切换健康节点" : "\(error_message) · 点击切换健康节点"
     }
 }
 
@@ -126,6 +160,7 @@ struct StatusPayload: Decodable {
     let tb3_online: Bool?
     let tb3_mount: String?
     let network: NetworkStatusInfo?
+    let clash: ClashStatusInfo?
 }
 
 struct DoctorCheck: Decodable, Identifiable {

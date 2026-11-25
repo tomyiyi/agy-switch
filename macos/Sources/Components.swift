@@ -151,35 +151,35 @@ struct CockpitStyleAccountCard: View {
         let badgeColor: Color = acc.running
             ? DS.brandBlue
             : (!acc.logged_in ? DS.brandOrange : (acc.health == "cooldown" ? DS.brandRed : (fam.isFlagged ? DS.brandOrange : DS.brandGreen)))
-        let badgeText: String = acc.running
+        let badgeText: String? = acc.running
             ? "当前运行"
-            : (!acc.logged_in ? "待登录" : (acc.health == "cooldown" ? "冷却 \(acc.cooldown_remaining_min)m" : (fam.isFlagged ? "待验证" : "已登录")))
+            : (!acc.logged_in ? "待登录" : (acc.health == "cooldown" ? "冷却 \(acc.cooldown_remaining_min)m" : (fam.isFlagged ? "待验证" : nil)))
         let sub5h = !acc.logged_in
             ? "需先登录"
             : (acc.reset_5h_min > 0 ? "\(acc.reset_5h_min / 60)h\(acc.reset_5h_min % 60)m 后重置" : "空闲满血")
         let sub7d = !acc.logged_in ? "无本地记录" : "活跃 \(acc.latest_active)"
 
         VStack(alignment: .leading, spacing: 0) {
-            // 主账号专属顶部 3.5px 主题色识别色带
+            // 主账号专属顶部细识别色带（跨组首选改用主卡绿边，避免双色抢镜）
             if fam.isManager {
                 LinearGradient(
-                    colors: [fam.tint, fam.tint.opacity(0.55)],
+                    colors: [fam.tint.opacity(0.85), fam.tint.opacity(0.35)],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
-                .frame(height: 3.5)
+                .frame(height: 2.5)
             }
 
-            VStack(alignment: .leading, spacing: fam.isManager ? 11 : 9) {
-                // 顶行：主号大号皇冠圆章 + 15pt Bold，子号 7px 圆点 + 13pt Semibold
+            VStack(alignment: .leading, spacing: fam.isManager ? 10 : 8.5) {
+                // 顶行：聚焦账号名，去掉常态“已登录”冗余胶囊杜绝标题截断
                 HStack(alignment: .center, spacing: 7) {
                     if fam.isManager {
                         ZStack {
                             Circle()
-                                .fill(fam.tint.opacity(0.16))
-                                .frame(width: 22, height: 22)
+                                .fill(fam.tint.opacity(0.14))
+                                .frame(width: 21, height: 21)
                             Image(systemName: "crown.fill")
-                                .font(.system(size: 10.5, weight: .bold))
+                                .font(.system(size: 10, weight: .bold))
                                 .foregroundColor(fam.tint)
                         }
                     } else {
@@ -187,18 +187,19 @@ struct CockpitStyleAccountCard: View {
                     }
 
                     Text(acc.label)
-                        .font(.system(size: fam.isManager ? 15 : 13, weight: fam.isManager ? .bold : .semibold))
+                        .font(.system(size: fam.isManager ? 14.5 : 13.5, weight: fam.isManager ? .bold : .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
 
                     Spacer(minLength: 4)
 
                     if isTopRecommended {
-                        Text("跨组首选")
+                        Label("跨组首选", systemImage: "sparkles")
                             .font(.system(size: 9.5, weight: .bold))
                             .foregroundColor(DS.brandGreen)
-                            .padding(.horizontal, 6.5)
-                            .padding(.vertical, 2)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2.5)
                             .background(Capsule().fill(DS.brandGreen.opacity(0.14)))
                     } else if isSameGroupAsActive {
                         Text("同组")
@@ -210,50 +211,50 @@ struct CockpitStyleAccountCard: View {
                             .help("与当前运行账号同属 \(fam.groupKey)，建议跨组切号")
                     }
 
-                    Text(badgeText)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundColor(badgeColor)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(badgeColor.opacity(0.13)))
+                    if let bText = badgeText {
+                        Text(bText)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(badgeColor)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(badgeColor.opacity(0.13)))
+                    }
                 }
 
-                // 真实绑定 Google 邮箱副标题（独立一行，绝不挤压主标题与徽章）
+                // 真实绑定 Google 邮箱或撞车提示
                 if !acc.displayEmail.isEmpty {
                     Text(acc.displayEmail)
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                } else if !acc.logged_in && !acc.duplicateTarget.isEmpty {
+                    Label("与 \(acc.duplicateTarget) 邮箱重复，无需再登", systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(DS.brandOrange)
+                        .lineLimit(1)
                 }
 
-                // 家庭组胶囊行：主号用实心高亮胶囊，子号用轻量描边胶囊
+                // 家庭组胶囊行：克制的语义描边风格，避免高饱和色块堆叠
                 HStack(spacing: 6) {
                     Button(action: { onEditNote?() }) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5) {
                             if !fam.shortBadge.isEmpty {
-                                if fam.isManager {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "star.fill").font(.system(size: 8))
-                                        Text("\(fam.shortBadge) · 主账号")
-                                            .font(.system(size: 10.5, weight: .bold))
+                                HStack(spacing: 3) {
+                                    if fam.isManager {
+                                        Image(systemName: "star.fill").font(.system(size: 7.5))
                                     }
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2.5)
-                                    .background(Capsule().fill(fam.tint))
-                                } else {
-                                    Text("\(fam.shortBadge) · 成员")
-                                        .font(.system(size: 10, weight: .medium))
-                                        .foregroundColor(fam.tint.opacity(0.92))
-                                        .padding(.horizontal, 6.5)
-                                        .padding(.vertical, 2)
-                                        .background(
-                                            Capsule()
-                                                .fill(fam.tint.opacity(0.08))
-                                                .overlay(Capsule().stroke(fam.tint.opacity(0.25), lineWidth: 0.7))
-                                        )
+                                    Text(fam.isManager ? "\(fam.shortBadge)·主" : "\(fam.shortBadge)·成员")
+                                        .font(.system(size: 10, weight: fam.isManager ? .bold : .medium))
                                 }
+                                .foregroundColor(fam.tint)
+                                .padding(.horizontal, 6.5)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(fam.tint.opacity(fam.isManager ? 0.13 : 0.07))
+                                        .overlay(Capsule().stroke(fam.tint.opacity(fam.isManager ? 0.35 : 0.2), lineWidth: 0.7))
+                                )
 
                                 if fam.isSolo {
                                     Text("独享")
@@ -261,7 +262,7 @@ struct CockpitStyleAccountCard: View {
                                         .foregroundColor(DS.brandGreen)
                                         .padding(.horizontal, 5.5)
                                         .padding(.vertical, 1.5)
-                                        .background(Capsule().fill(DS.brandGreen.opacity(0.12)))
+                                        .background(Capsule().fill(DS.brandGreen.opacity(0.11)))
                                 }
 
                                 if !fam.cleanNote.isEmpty {
@@ -269,6 +270,8 @@ struct CockpitStyleAccountCard: View {
                                         .font(.system(size: 10.5))
                                         .foregroundColor(fam.isFlagged ? DS.brandOrange : .secondary)
                                         .lineLimit(1)
+                                        .truncationMode(.tail)
+                                        .help(fam.cleanNote)
                                 }
                             } else {
                                 Image(systemName: "tag")
@@ -902,5 +905,185 @@ struct QuickSwitchHUDView: View {
                 searchFocused = true
             }
         }
+    }
+}
+
+// MARK: - 反重力代理哨兵 + Clash Verge 节点直控 Popover
+struct NetworkSentinelPopover: View {
+    @ObservedObject var store: SwitchStore
+
+    var body: some View {
+        let net = store.networkStatus ?? store.status?.network
+        let clash = store.clashStatus ?? net?.clash ?? store.status?.clash
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill((net?.clean_for_antigravity ?? false) ? DS.brandGreen : DS.brandRed)
+                    .frame(width: 8, height: 8)
+                Text("代理节点哨兵")
+                    .font(.system(size: 13.5, weight: .bold))
+                Spacer()
+                Button(action: { store.probeNetwork(showFeedback: true) }) {
+                    HStack(spacing: 4) {
+                        if store.isProbingNetwork {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise").font(.system(size: 10.5))
+                        }
+                        Text(store.isProbingNetwork ? "测活中" : "重测出口")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .buttonStyle(SubtlePillButtonStyle())
+                .disabled(store.isProbingNetwork || store.isSwitchingClash)
+            }
+
+            if let n = net {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("出口 IP / 地区")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(n.exit_ip.isEmpty ? "未知" : n.exit_ip) · \(n.country.isEmpty ? "—" : n.country)")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    }
+                    HStack {
+                        Text("Antigravity 通道")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(n.clean_for_antigravity ? "畅通 (\(n.latency_ms)ms)" : (n.error_message.isEmpty ? "异常" : "受限/不可达"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(n.clean_for_antigravity ? DS.brandGreen : DS.brandRed)
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 9).fill(DS.insetBg))
+            }
+
+            if let c = clash, c.available {
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Clash Verge · \(c.active_group)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        Text("当前：\(c.active_node)")
+                            .font(.system(size: 12.5, weight: .bold))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button(action: { store.clashAutoSelect(group: c.active_group) }) {
+                        HStack(spacing: 4) {
+                            if store.isSwitchingClash {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "wand.and.stars").font(.system(size: 10.5))
+                            }
+                            Text(store.isSwitchingClash ? "优选中..." : "自动优选")
+                        }
+                    }
+                    .buttonStyle(PrimaryPillButtonStyle(compact: true, tint: DS.brandBlue))
+                    .disabled(store.isSwitchingClash)
+                }
+
+                if !c.candidates.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(c.candidates) { item in
+                                Button(action: {
+                                    if !item.selected {
+                                        store.clashSwitchNode(group: c.active_group, node: item.name)
+                                    }
+                                }) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: item.selected ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(item.selected ? DS.brandGreen : .secondary.opacity(0.6))
+                                        Text(item.name)
+                                            .font(.system(size: 11.5, weight: item.selected ? .semibold : .regular))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                            .truncationMode(.tail)
+                                        Spacer()
+                                        if item.delay_ms > 0 {
+                                            Text("\(item.delay_ms)ms")
+                                                .font(.system(size: 10.5, design: .monospaced))
+                                                .foregroundColor(item.delay_ms < 220 ? DS.brandGreen : DS.brandOrange)
+                                        }
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(RoundedRectangle(cornerRadius: 7).fill(item.selected ? DS.brandGreen.opacity(0.08) : Color.clear))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(store.isSwitchingClash)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 165)
+                }
+            } else {
+                Text("未检测到本地 Clash Verge 控制通道，仅显示公网出口探测。")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+}
+
+// MARK: - 轻量交接单 Markdown 渲染（零第三方依赖，提升长文档可读性）
+struct MarkdownPreviewView: View {
+    let markdown: String
+
+    var body: some View {
+        let lines = markdown.components(separatedBy: "\n")
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("# ") {
+                    Text(String(trimmed.dropFirst(2)))
+                        .font(.system(size: 15, weight: .bold))
+                        .padding(.top, 4)
+                } else if trimmed.hasPrefix("## ") {
+                    Text(String(trimmed.dropFirst(3)))
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(DS.brandBlue)
+                        .padding(.top, 6)
+                } else if trimmed.hasPrefix("### ") {
+                    Text(String(trimmed.dropFirst(4)))
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.top, 3)
+                } else if trimmed == "---" || trimmed == "***" {
+                    Divider().padding(.vertical, 3)
+                } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("•").foregroundColor(DS.brandBlue).font(.system(size: 12, weight: .bold))
+                        Text(String(trimmed.dropFirst(2)))
+                            .font(.system(size: 12))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if trimmed.hasPrefix("> ") {
+                    Text(String(trimmed.dropFirst(2)))
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 8)
+                        .overlay(Rectangle().fill(DS.brandBlue.opacity(0.4)).frame(width: 2), alignment: .leading)
+                } else if !trimmed.isEmpty {
+                    Text(line)
+                        .font(.system(size: 12))
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Spacer().frame(height: 3)
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
     }
 }

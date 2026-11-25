@@ -5,6 +5,7 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject var store: SwitchStore
     @State private var showCalibrate: Bool = false
+    @State private var showNetworkPopover: Bool = false
     @State private var cal5h: Double = 80
     @State private var cal7d: Double = 95
 
@@ -12,52 +13,47 @@ struct DashboardView: View {
         let accounts = store.status?.accounts ?? []
         let activeAcc = accounts.first(where: { $0.running })
         let activeGroupKey = activeAcc.map { FamilyVisual.from($0).groupKey }
-        let readyCount = accounts.filter { $0.logged_in && $0.health != "cooldown" && !$0.isFlagged }.count
+        let relayReadyCount = accounts.filter { !$0.running && $0.logged_in && $0.health != "cooldown" && !$0.isFlagged }.count
         let total7dTurns = accounts.reduce(0) { $0 + $1.turns_7d }
         let recommended = Array(store.recommendedAccounts.prefix(6))
         let topTarget = recommended.first
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // 紧凑状态舱 + 首页工作区一键快切
-                HStack(spacing: 12) {
-                    Label("账号池 \(accounts.count)", systemImage: "person.2")
-                    Divider().frame(height: 12)
-                    Label("可用 \(readyCount)", systemImage: "checkmark.circle.fill")
+                // 紧凑状态舱 + Clash 节点直控哨兵 + 3TB 状态 + 工作区快切
+                HStack(spacing: 11) {
+                    Label("可接力 \(relayReadyCount) / \(accounts.count)", systemImage: "checkmark.circle.fill")
                         .foregroundColor(DS.brandGreen)
                     Divider().frame(height: 12)
                     Label("近 7 天 \(total7dTurns) 轮", systemImage: "chart.bar")
                         .foregroundColor(.secondary)
 
-                    if let top = topTarget {
-                        Divider().frame(height: 12)
-                        HStack(spacing: 4) {
-                            Image(systemName: "sparkles").foregroundColor(DS.brandGreen)
-                            Text("跨组首选：\(top.label)")
-                                .foregroundColor(DS.brandGreen)
-                                .fontWeight(.semibold)
-                        }
-                    }
-
                     Spacer()
 
-                    // 反重力代理节点哨兵胶囊（点击可立即重测）
+                    // 反重力代理节点哨兵胶囊（点击弹出 Clash 节点直控面板）
                     if let net = store.networkStatus ?? store.status?.network {
-                        Button(action: { store.probeNetwork(showFeedback: true) }) {
+                        Button(action: { showNetworkPopover.toggle() }) {
                             HStack(spacing: 5) {
                                 Circle()
                                     .fill(net.clean_for_antigravity ? DS.brandGreen : DS.brandRed)
                                     .frame(width: 6.5, height: 6.5)
-                                Text(store.isProbingNetwork ? "测活中..." : net.badgeTitle)
+                                Text(store.isProbingNetwork || store.isSwitchingClash ? "测活中..." : net.badgeTitle)
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundColor(net.clean_for_antigravity ? DS.brandGreen : DS.brandRed)
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                    .foregroundColor((net.clean_for_antigravity ? DS.brandGreen : DS.brandRed).opacity(0.75))
                             }
                             .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
+                            .padding(.vertical, 3.5)
                             .background(Capsule().fill(net.clean_for_antigravity ? DS.brandGreen.opacity(0.1) : DS.brandRed.opacity(0.12)))
                         }
                         .buttonStyle(.plain)
                         .help(net.helpDetail)
+                        .popover(isPresented: $showNetworkPopover, arrowEdge: .bottom) {
+                            NetworkSentinelPopover(store: store)
+                        }
                     } else {
                         Button(action: { store.probeNetwork(showFeedback: true) }) {
                             Text(store.isProbingNetwork ? "节点测活中..." : "🌐 检测节点")
@@ -146,8 +142,9 @@ struct DashboardView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 8) {
                                 Circle().fill(activeAcc != nil ? DS.brandBlue : .gray).frame(width: 9, height: 9)
-                                Text(activeAcc?.label ?? "当前无运行实例")
-                                    .font(.system(size: 20, weight: .bold))
+                                Text(activeAcc?.shortTitle ?? "当前无运行实例")
+                                    .font(.system(size: 19, weight: .bold))
+                                    .lineLimit(1)
 
                                 if let a = activeAcc {
                                     let fam = FamilyVisual.from(a)
@@ -723,11 +720,15 @@ struct HandoffView: View {
                         }
                     }
                     ScrollView {
-                        Text(store.status?.handoff_preview.isEmpty == false ? store.status!.handoff_preview : "尚未生成 HANDOFF_AUTO.md，点击上方按钮即可生成。")
-                            .font(.system(size: 12, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(14)
+                        if let preview = store.status?.handoff_preview, !preview.isEmpty {
+                            MarkdownPreviewView(markdown: preview)
+                        } else {
+                            Text("尚未生成 HANDOFF_AUTO.md，点击上方按钮即可生成。")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                        }
                     }
                     .background(RoundedRectangle(cornerRadius: 12).fill(DS.cardBg))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.border, lineWidth: 1))

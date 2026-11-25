@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -299,6 +300,40 @@ class TestAgySwitchEngine(unittest.TestCase):
             self.assertEqual(popen_mock.call_count, 2)
             script_arg = popen_mock.call_args_list[1][0][0][2]
             self.assertIn('if frontApp is "Antigravity"', script_arg)
+
+    def test_clash_status_graceful_fallback_and_node_filtering(self):
+        # 1. Socket 缺失时优雅降级
+        with mock.patch.dict(os.environ, {"AGY_CLASH_SOCKET": "/tmp/nonexistent-clash.sock"}):
+            res = server.get_clash_status()
+            self.assertFalse(res["available"])
+            self.assertEqual(res["candidates"], [])
+
+        # 2. Mock Clash proxies 响应：应自动过滤香港/CN/低延迟死节点(delay=0)
+        fake_proxies = {
+            "proxies": {
+                "GLOBAL": {"type": "Selector", "now": "🤖 AI 专用"},
+                "🤖 AI 专用": {
+                    "type": "Selector",
+                    "now": "美国东部",
+                    "all": ["美国东部", "香港 01", "美国 B05 Error", "日本 B02", "剩余流量: 99GB"],
+                },
+                "美国东部": {"type": "AnyTLS", "history": [{"delay": 180}]},
+                "香港 01": {"type": "AnyTLS", "history": [{"delay": 35}]},
+                "美国 B05 Error": {"type": "AnyTLS", "history": [{"delay": 0}]},
+                "日本 B02": {"type": "Vless", "history": [{"delay": 88}]},
+                "剩余流量: 99GB": {"type": "Direct", "history": []},
+            }
+        }
+        with mock.patch.object(server, "detect_clash_socket", return_value="/tmp/mock.sock"), \
+             mock.patch.object(server, "_clash_request", return_value=(200, fake_proxies)):
+            res = server.get_clash_status()
+            self.assertTrue(res["available"])
+            self.assertEqual(res["active_group"], "🤖 AI 专用")
+            self.assertEqual(res["active_node"], "美国东部")
+            cand_names = [c["name"] for c in res["candidates"]]
+            self.assertEqual(cand_names, ["美国东部", "日本 B02"])
+            self.assertNotIn("香港 01", cand_names)
+            self.assertNotIn("美国 B05 Error", cand_names)
 
 
 if __name__ == "__main__":

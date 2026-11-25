@@ -147,14 +147,33 @@ struct MainRootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 if !store.toast.isEmpty {
-                    Text(store.toast)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.black.opacity(0.84)))
-                        .shadow(radius: 8)
-                        .padding(.bottom, 18)
+                    let toastColor: Color = {
+                        switch store.toastKind {
+                        case .success: return DS.brandGreen
+                        case .warning: return DS.brandOrange
+                        case .error: return DS.brandRed
+                        case .info: return Color.black.opacity(0.84)
+                        }
+                    }()
+                    let toastIcon: String = {
+                        switch store.toastKind {
+                        case .success: return "checkmark.circle.fill"
+                        case .warning: return "exclamationmark.triangle.fill"
+                        case .error: return "xmark.octagon.fill"
+                        case .info: return "info.circle.fill"
+                        }
+                    }()
+                    HStack(spacing: 7) {
+                        Image(systemName: toastIcon).font(.system(size: 12))
+                        Text(store.toast).font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8.5)
+                    .background(Capsule().fill(toastColor.opacity(0.92)))
+                    .shadow(color: toastColor.opacity(0.28), radius: 10, y: 4)
+                    .padding(.bottom, 18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
         }
