@@ -295,6 +295,22 @@ def pick_best_candidates(accounts: list, running_id: str) -> list:
     return eligible
 
 
+
+def get_instance_real_email(acc_id: str) -> str:
+    """从 app_storage.json 安全提取该实例实际登录绑定的 Google 邮箱账号"""
+    if acc_id == "main":
+        p = HOME / "Library" / "Application Support" / "Antigravity" / "app_storage.json"
+    else:
+        p = MULTI_DIR / acc_id / "data" / "app_storage.json"
+    if p.exists():
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            return d.get("agy.onboarding.lastLoginUsername", "").strip()
+        except Exception:
+            pass
+    return ""
+
+
 def list_accounts(state: dict):
     running_id, running_pid = detect_running_instance()
     now = time.time()
@@ -309,7 +325,9 @@ def list_accounts(state: dict):
     all_sessions = []
 
     main_metrics = scan_account_metrics(HOME / ".gemini")
-    candidates = [("main", "主账号 (~/.gemini)", "/Applications/Antigravity.app", main_metrics)]
+    main_email = get_instance_real_email("main")
+    main_disp = f"主账号 ({main_email})" if main_email else "主账号 (~/.gemini)"
+    candidates = [("main", main_disp, "/Applications/Antigravity.app", main_metrics)]
 
     if MULTI_DIR.exists():
         dirs = [d for d in MULTI_DIR.iterdir() if d.is_dir()]
@@ -318,7 +336,9 @@ def list_accounts(state: dict):
             acc_id = d.name
             app_path = str(APP_DIR / f"Antigravity-{acc_id}.app")
             metrics = scan_account_metrics(d / ".gemini")
-            candidates.append((acc_id, acc_id, app_path, metrics))
+            real_email = get_instance_real_email(acc_id)
+            disp_label = f"{acc_id} ({real_email})" if real_email and real_email not in acc_id else acc_id
+            candidates.append((acc_id, disp_label, app_path, metrics))
 
     # 收集去重后的最近会话（优先挂在当前运行账号名下，避免软链 brain 重复展示同一会话）
     ordered_for_sessions = sorted(candidates, key=lambda c: 0 if c[0] == running_id else 1)
