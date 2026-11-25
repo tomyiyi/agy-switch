@@ -6,6 +6,7 @@ struct DashboardView: View {
     @ObservedObject var store: SwitchStore
     @State private var showCalibrate: Bool = false
     @State private var showNetworkPopover: Bool = false
+    @State private var selectedRecId: String? = nil
     @State private var cal5h: Double = 80
     @State private var cal7d: Double = 95
 
@@ -17,6 +18,7 @@ struct DashboardView: View {
         let total7dTurns = accounts.reduce(0) { $0 + $1.turns_7d }
         let recommended = Array(store.recommendedAccounts.prefix(6))
         let topTarget = recommended.first
+        let selectedTarget = recommended.first(where: { $0.id == selectedRecId }) ?? topTarget
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -48,6 +50,7 @@ struct DashboardView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3.5)
                             .background(Capsule().fill(net.clean_for_antigravity ? DS.brandGreen.opacity(0.1) : DS.brandRed.opacity(0.12)))
+                            .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .help(net.helpDetail)
@@ -213,9 +216,17 @@ struct DashboardView: View {
                             .buttonStyle(SubtlePillButtonStyle())
                             .disabled(store.isRefreshing)
 
-                            Button(action: { store.switchTo("") }) {
+                            Button(action: {
+                                if let selId = selectedRecId, recommended.contains(where: { $0.id == selId }) {
+                                    store.switchTo(selId)
+                                } else {
+                                    store.switchTo("")
+                                }
+                            }) {
                                 Label(
-                                    topTarget != nil ? "一键跨组接力 → \(topTarget!.label)" : "一键跨组接力",
+                                    selectedTarget != nil
+                                        ? ((selectedRecId != nil && selectedTarget!.id == selectedRecId) ? "切换到 → \(selectedTarget!.label)" : "一键跨组接力 → \(selectedTarget!.label)")
+                                        : "一键跨组接力",
                                     systemImage: "bolt.fill"
                                 )
                             }
@@ -292,6 +303,12 @@ struct DashboardView: View {
                             isBusy: store.isBusy,
                             activeGroupKey: activeGroupKey,
                             isTopRecommended: idx == 0,
+                            isSelected: selectedRecId == acc.id,
+                            onSelect: {
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    selectedRecId = (selectedRecId == acc.id) ? nil : acc.id
+                                }
+                            },
                             onSwitch: { store.switchTo(acc.id) },
                             onToggleCooldown: { store.setCooldown(acc.id, hours: 5) }
                         )

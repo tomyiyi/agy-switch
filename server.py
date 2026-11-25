@@ -1077,47 +1077,72 @@ def _is_blocked_node_name(name: str) -> bool:
 
 
 def get_clash_status() -> dict:
+    empty = {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": [], "groups": []}
     sock_path = detect_clash_socket()
     if not sock_path:
-        return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+        return empty
     try:
         status_code, data = _clash_request(sock_path, "GET", "/proxies", timeout=1.2)
         if status_code != 200 or not isinstance(data, dict):
-            return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+            return empty
         proxies = data.get("proxies", {})
         group_name = _pick_primary_clash_group(proxies)
         if not group_name or group_name not in proxies:
-            return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+            return empty
 
-        ginfo = proxies[group_name]
-        active_node = str(ginfo.get("now") or "")
-        active_hist = (proxies.get(active_node) or {}).get("history") or []
-        active_delay = int(active_hist[-1].get("delay", 0)) if active_hist else 0
-
-        candidates = []
-        for n in ginfo.get("all", []):
-            if _is_blocked_node_name(n):
-                continue
-            ninfo = proxies.get(n) or {}
-            hist = ninfo.get("history") or []
-            delay = int(hist[-1].get("delay", 0)) if hist else 0
-            if delay > 0 or n == active_node:
-                candidates.append({
+        def _build_group(gname: str) -> dict:
+            gi = proxies[gname]
+            now_node = str(gi.get("now") or "")
+            now_hist = (proxies.get(now_node) or {}).get("history") or []
+            now_delay = int(now_hist[-1].get("delay", 0)) if now_hist else 0
+            cands = []
+            for n in gi.get("all", []):
+                if _is_blocked_node_name(n):
+                    continue
+                ninfo = proxies.get(n) or {}
+                hist = ninfo.get("history") or []
+                if hist:
+                    delay = int(hist[-1].get("delay", 0))
+                    # 明确测速失败 (delay == 0) 且非当前选中节点：跳过死节点
+                    if delay == 0 and n != now_node:
+                        continue
+                else:
+                    # 尚未测速：保留展示，用 -1 区分未测速与死节点
+                    delay = -1
+                cands.append({
                     "name": n,
                     "delay_ms": delay,
                     "type": str(ninfo.get("type") or ""),
-                    "selected": (n == active_node),
+                    "selected": (n == now_node),
                 })
-        candidates.sort(key=lambda c: (not c["selected"], c["delay_ms"] if c["delay_ms"] > 0 else 99999, c["name"]))
+            cands.sort(key=lambda c: (not c["selected"], c["delay_ms"] if c["delay_ms"] > 0 else 99999, c["name"]))
+            return {
+                "name": gname,
+                "active_node": now_node,
+                "delay_ms": now_delay,
+                "candidates": cands[:24],
+            }
+
+        primary = _build_group(group_name)
+        groups_out = [primary]
+        for gname, gi in proxies.items():
+            if gname == group_name or gname == "GLOBAL":
+                continue
+            if isinstance(gi, dict) and gi.get("type") == "Selector":
+                low = gname.lower()
+                if any(k in low for k in ("gemini", "ai", "手动", "proxy", "节点", "选择")):
+                    groups_out.append(_build_group(gname))
+
         return {
             "available": True,
             "active_group": group_name,
-            "active_node": active_node,
-            "delay_ms": active_delay,
-            "candidates": candidates[:8],
+            "active_node": primary["active_node"],
+            "delay_ms": primary["delay_ms"],
+            "candidates": primary["candidates"],
+            "groups": groups_out[:4],
         }
     except Exception:
-        return {"available": False, "active_group": "", "active_node": "", "delay_ms": 0, "candidates": []}
+        return empty
 
 
 def switch_clash_node(node: str, group: str = "") -> dict:

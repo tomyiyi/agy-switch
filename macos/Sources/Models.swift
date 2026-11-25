@@ -91,12 +91,21 @@ struct ClashNodeCandidate: Decodable, Identifiable {
     let selected: Bool
 }
 
+struct ClashGroupInfo: Decodable, Identifiable {
+    var id: String { name }
+    let name: String
+    let active_node: String
+    let delay_ms: Int
+    let candidates: [ClashNodeCandidate]
+}
+
 struct ClashStatusInfo: Decodable {
     let available: Bool
     let active_group: String
     let active_node: String
     let delay_ms: Int
     let candidates: [ClashNodeCandidate]
+    let groups: [ClashGroupInfo]?
 }
 
 struct NetworkStatusInfo: Decodable {

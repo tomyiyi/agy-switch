@@ -138,6 +138,8 @@ struct CockpitStyleAccountCard: View {
     let isBusy: Bool
     var activeGroupKey: String? = nil
     var isTopRecommended: Bool = false
+    var isSelected: Bool = false
+    var onSelect: (() -> Void)? = nil
     let onSwitch: () -> Void
     let onToggleCooldown: () -> Void
     var onEditNote: (() -> Void)? = nil
@@ -372,14 +374,31 @@ struct CockpitStyleAccountCard: View {
         .overlay(
             RoundedRectangle(cornerRadius: 13)
                 .stroke(
-                    acc.running
-                        ? DS.brandBlue.opacity(0.78)
-                        : (isTopRecommended
-                            ? DS.brandGreen.opacity(0.55)
-                            : (fam.isManager ? fam.tint.opacity(isHovered ? 0.65 : 0.42) : (isHovered ? DS.brandBlue.opacity(0.3) : DS.border))),
-                    lineWidth: (acc.running || fam.isManager || isTopRecommended) ? 1.5 : 1
+                    isSelected
+                        ? DS.brandBlue
+                        : (acc.running
+                            ? DS.brandBlue.opacity(0.78)
+                            : (isTopRecommended
+                                ? DS.brandGreen.opacity(0.55)
+                                : (fam.isManager ? fam.tint.opacity(isHovered ? 0.65 : 0.42) : (isHovered ? DS.brandBlue.opacity(0.35) : DS.border)))),
+                    lineWidth: isSelected ? 2.4 : ((acc.running || fam.isManager || isTopRecommended) ? 1.5 : 1)
                 )
         )
+        .overlay(alignment: .topTrailing) {
+            if isSelected {
+                Label("已选中", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Capsule().fill(DS.brandBlue))
+                    .offset(x: -10, y: -9)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 13))
+        .onTapGesture {
+            onSelect?()
+        }
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.15), value: isHovered)
         .contextMenu {
@@ -928,10 +947,21 @@ struct QuickSwitchHUDView: View {
 // MARK: - 反重力代理哨兵 + Clash Verge 节点直控 Popover
 struct NetworkSentinelPopover: View {
     @ObservedObject var store: SwitchStore
+    @State private var selectedGroupName: String = ""
 
     var body: some View {
         let net = store.networkStatus ?? store.status?.network
         let clash = store.clashStatus ?? net?.clash ?? store.status?.clash
+        let allGroups = clash?.groups ?? []
+        let activeGroupObj: ClashGroupInfo? = {
+            if !selectedGroupName.isEmpty, let g = allGroups.first(where: { $0.name == selectedGroupName }) {
+                return g
+            }
+            return allGroups.first
+        }()
+        let targetGroupName = activeGroupObj?.name ?? (clash?.active_group ?? "")
+        let currentNodeName = activeGroupObj?.active_node ?? (clash?.active_node ?? "")
+        let candidates = activeGroupObj?.candidates ?? (clash?.candidates ?? [])
 
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -982,65 +1012,106 @@ struct NetworkSentinelPopover: View {
 
             if let c = clash, c.available {
                 Divider()
+
+                if allGroups.count > 1 {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(allGroups) { grp in
+                                let isGrpSelected = (grp.name == targetGroupName)
+                                Button(action: { selectedGroupName = grp.name }) {
+                                    Text(grp.name)
+                                        .font(.system(size: 11, weight: isGrpSelected ? .bold : .medium))
+                                        .foregroundColor(isGrpSelected ? .white : .secondary)
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 4)
+                                        .background(Capsule().fill(isGrpSelected ? DS.brandBlue : Color.primary.opacity(0.06)))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Clash Verge · \(c.active_group)")
+                        Text("Clash · \(targetGroupName)")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.secondary)
-                        Text("当前：\(c.active_node)")
+                        Text("当前：\(currentNodeName)")
                             .font(.system(size: 12.5, weight: .bold))
                             .lineLimit(1)
                     }
                     Spacer()
-                    Button(action: { store.clashAutoSelect(group: c.active_group) }) {
+                    Button(action: { store.clashAutoSelect(group: targetGroupName) }) {
                         HStack(spacing: 4) {
                             if store.isSwitchingClash {
                                 ProgressView().controlSize(.mini)
                             } else {
                                 Image(systemName: "wand.and.stars").font(.system(size: 10.5))
                             }
-                            Text(store.isSwitchingClash ? "优选中..." : "自动优选")
+                            Text(store.isSwitchingClash ? "优选中..." : "全组优选")
                         }
                     }
                     .buttonStyle(PrimaryPillButtonStyle(compact: true, tint: DS.brandBlue))
                     .disabled(store.isSwitchingClash)
                 }
 
-                if !c.candidates.isEmpty {
+                if !candidates.isEmpty {
                     ScrollView {
-                        VStack(spacing: 4) {
-                            ForEach(c.candidates) { item in
+                        VStack(spacing: 5) {
+                            ForEach(candidates) { item in
                                 Button(action: {
                                     if !item.selected {
-                                        store.clashSwitchNode(group: c.active_group, node: item.name)
+                                        store.clashSwitchNode(group: targetGroupName, node: item.name)
                                     }
                                 }) {
                                     HStack(spacing: 8) {
                                         Image(systemName: item.selected ? "checkmark.circle.fill" : "circle")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(item.selected ? DS.brandGreen : .secondary.opacity(0.6))
+                                            .font(.system(size: 12))
+                                            .foregroundColor(item.selected ? DS.brandGreen : .secondary.opacity(0.55))
                                         Text(item.name)
-                                            .font(.system(size: 11.5, weight: item.selected ? .semibold : .regular))
+                                            .font(.system(size: 12, weight: item.selected ? .bold : .regular))
                                             .foregroundColor(.primary)
                                             .lineLimit(1)
                                             .truncationMode(.tail)
                                         Spacer()
+                                        if item.selected {
+                                            Text("使用中")
+                                                .font(.system(size: 9.5, weight: .bold))
+                                                .foregroundColor(DS.brandGreen)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Capsule().fill(DS.brandGreen.opacity(0.14)))
+                                        }
                                         if item.delay_ms > 0 {
                                             Text("\(item.delay_ms)ms")
-                                                .font(.system(size: 10.5, design: .monospaced))
+                                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                                                 .foregroundColor(item.delay_ms < 220 ? DS.brandGreen : DS.brandOrange)
+                                        } else if item.delay_ms < 0 {
+                                            Text("点击切换")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.secondary.opacity(0.7))
                                         }
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(RoundedRectangle(cornerRadius: 7).fill(item.selected ? DS.brandGreen.opacity(0.08) : Color.clear))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 6.5)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(item.selected ? DS.brandGreen.opacity(0.11) : DS.insetBg.opacity(0.65))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(item.selected ? DS.brandGreen.opacity(0.55) : Color.clear, lineWidth: 1.2)
+                                    )
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(store.isSwitchingClash)
                             }
                         }
                     }
-                    .frame(maxHeight: 165)
+                    .frame(maxHeight: 210)
                 }
             } else {
                 Text("未检测到本地 Clash Verge 控制通道，仅显示公网出口探测。")
@@ -1049,7 +1120,7 @@ struct NetworkSentinelPopover: View {
             }
         }
         .padding(14)
-        .frame(width: 320)
+        .frame(width: 350)
     }
 }
 
