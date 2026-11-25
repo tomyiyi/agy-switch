@@ -16,11 +16,13 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-APP_VERSION = "5.4.0"
+APP_VERSION = "5.5.0"
 
 _raw_home = str(Path.home())
 HOME = (
@@ -809,6 +811,62 @@ def unify_shared_assets() -> dict:
     }
 
 
+
+def probe_network_quality() -> dict:
+    """
+    毫秒级探测当前代理与出口网络质量（严格 2.5 秒总超时）：
+    1. 测出口 IP 与国家/地区（避开 HK 等受限区）；
+    2. 测 antigravity.google 官方鉴权端点；
+    3. 测 accounts.google.com 登录通行证。
+    """
+    result = {
+        "ok": True,
+        "exit_ip": "",
+        "country": "",
+        "region": "",
+        "org": "",
+        "latency_ms": 0,
+        "antigravity_ok": False,
+        "auth_ok": False,
+        "clean_for_antigravity": False,
+        "error_message": ""
+    }
+    # 1. 测反重力鉴权通道
+    try:
+        t0 = time.time()
+        req = urllib.request.Request("https://antigravity.google/favicon.svg", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            result["antigravity_ok"] = (resp.status == 200)
+            result["latency_ms"] = int((time.time() - t0) * 1000)
+    except Exception as e:
+        result["error_message"] = f"反重力鉴权连接失败: {e}"
+
+    # 2. 测 Google 登录通行证
+    try:
+        req = urllib.request.Request("https://accounts.google.com/generate_204", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            result["auth_ok"] = (resp.status == 204)
+    except Exception:
+        pass
+
+    # 3. 查出口地区
+    try:
+        req = urllib.request.Request("https://ipinfo.io/json", headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            ip_data = json.loads(resp.read().decode())
+            result["exit_ip"] = ip_data.get("ip", "")
+            result["country"] = ip_data.get("country", "")
+            result["region"] = f"{ip_data.get('city', '')}, {ip_data.get('region', '')}".strip(", ")
+            result["org"] = ip_data.get("org", "")
+    except Exception:
+        pass
+
+    # 综合研判
+    is_supported_region = (result["country"] not in ["HK", "CN", "RU", "IR"])
+    result["clean_for_antigravity"] = bool(result["antigravity_ok"] and result["auth_ok"] and is_supported_region)
+    return result
+
+
 def perform_switch(target_app: str, target_label: str, source_id: str = "", target_id: str = "") -> None:
     """
     安全切号编排（在 state_lock 之外运行，不阻塞状态查询）：
@@ -1172,6 +1230,7 @@ def main():
                 "switch_history": (state.get("switch_history") or [])[:10],
                 "tb3_online": bool(detect_3tb_brain_dir()),
                 "tb3_mount": str(detect_3tb_brain_dir() or ""),
+                "network": probe_network_quality(),
             }, ensure_ascii=False))
             return
 
@@ -1206,6 +1265,12 @@ def main():
 
         # 切号命令：先在锁外扫描并执行退旧号/拉新号，仅在切换真正成功后的毫秒级临界区内写入 state.json！
         if args.cli_switch is not None:
+            # 启动前节点健康前置拦截：若网络连通性受损或处于封禁区，提前拦截避免污染账号凭据
+            net_status = probe_network_quality()
+            if not net_status.get("clean_for_antigravity", False):
+                err_tip = net_status.get("error_message") or f"当前代理节点处于不可用地区({net_status.get('country')})或鉴权失败"
+                print(json.dumps({"error": f"节点网络异常，已拦截启动：{err_tip}。请在 Clash Verge 切换至有效美国/日本节点后重试！"}, ensure_ascii=False))
+                return
             target_id = args.cli_switch.strip()
             snap = _read_state_snapshot()
             accounts, sessions, running_id, _ = list_accounts(snap)

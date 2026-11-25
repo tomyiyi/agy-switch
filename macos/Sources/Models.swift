@@ -1,7 +1,7 @@
 import Cocoa
 import SwiftUI
 
-let APP_VERSION = "5.4.0"
+let APP_VERSION = "5.5.0"
 
 struct AccountInfo: Decodable, Identifiable {
     let id: String
@@ -67,6 +67,20 @@ struct SwitchRecord: Decodable, Identifiable {
     let reason: String?
 }
 
+
+struct NetworkStatusInfo: Decodable {
+    let ok: Bool
+    let exit_ip: String
+    let country: String
+    let region: String
+    let org: String
+    let latency_ms: Int
+    let antigravity_ok: Bool
+    let auth_ok: Bool
+    let clean_for_antigravity: Bool
+    let error_message: String
+}
+
 struct StatusPayload: Decodable {
     let version: String?
     let relay_prompt: String?
@@ -85,6 +99,7 @@ struct StatusPayload: Decodable {
     let switch_history: [SwitchRecord]?
     let tb3_online: Bool?
     let tb3_mount: String?
+    let network: NetworkStatusInfo?
 }
 
 struct DoctorCheck: Decodable, Identifiable {

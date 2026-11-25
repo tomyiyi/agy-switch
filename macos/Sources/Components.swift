@@ -791,7 +791,22 @@ struct QuickSwitchHUDView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Color.primary.opacity(0.04)))
-                .help(tbOnline ? "黑苹果 3TB 知识库中心仓已挂载，接力单将自动双向同步" : "3TB 未挂载，仅在本地保存接力单")
+
+                // 网络与节点健康徽章 (反重力专属哨兵)
+                if let net = store.status?.network {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(net.clean_for_antigravity ? DS.brandGreen : Color.red)
+                            .frame(width: 6, height: 6)
+                        Text(net.clean_for_antigravity ? "🌐 \(net.country) · \(net.latency_ms)ms" : "⚠️ 节点不可用")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(net.clean_for_antigravity ? DS.brandGreen : .red)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(net.clean_for_antigravity ? Color.green.opacity(0.08) : Color.red.opacity(0.12)))
+                    .help(net.clean_for_antigravity ? "出口: \(net.exit_ip) (\(net.region)) · 鉴权通道正常" : (net.error_message.isEmpty ? "当前节点处于不可用地区，请切美/日节点" : net.error_message))
+                }
 
                 Spacer()
 
